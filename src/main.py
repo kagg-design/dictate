@@ -65,15 +65,17 @@ def create_start_menu_shortcut():
             
         shortcut_path = os.path.join(appdata, r"Microsoft\Windows\Start Menu\Programs\Dictate.lnk")
         project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        target_path = os.path.join(project_dir, "run.bat")
+        target_path = sys.executable
+        arguments = "-m src.main"
         icon_path = os.path.join(project_dir, "icon.ico")
         
         # We always verify/overwrite to keep paths fresh
         ps_script = f"""
-        $shortcutPath = "{shortcut_path}"
-        $targetPath = "{target_path}"
-        $workDir = "{project_dir}"
-        $iconPath = "{icon_path}"
+        $shortcutPath = '{shortcut_path}'
+        $targetPath = '{target_path}'
+        $arguments = '{arguments}'
+        $workDir = '{project_dir}'
+        $iconPath = '{icon_path}'
         $appId = "Dictate"
 
         $source = '
@@ -140,10 +142,11 @@ def create_start_menu_shortcut():
             }}
 
             public class Creator {{
-                public static void Create(string shortcutPath, string targetPath, string workDir, string iconPath, string appId) {{
+                public static void Create(string shortcutPath, string targetPath, string workDir, string iconPath, string appId, string arguments) {{
                     var link = (IShellLinkW)new ShellLink();
                     link.SetPath(targetPath);
                     link.SetWorkingDirectory(workDir);
+                    link.SetArguments(arguments);
                     link.SetIconLocation(iconPath, 0);
                     
                     var store = (IPropertyStore)link;
@@ -159,7 +162,7 @@ def create_start_menu_shortcut():
         '
 
         Add-Type -TypeDefinition $source
-        [ShortcutHelper.Creator]::Create($shortcutPath, $targetPath, $workDir, $iconPath, $appId)
+        [ShortcutHelper.Creator]::Create($shortcutPath, $targetPath, $workDir, $iconPath, $appId, $arguments)
         """
         
         result = subprocess.run(
