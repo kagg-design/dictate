@@ -111,7 +111,7 @@ class HotkeyManager:
 
     def _unblock_win_keys(self):
         """
-        Unblocks Windows keys, restoring default functionality.
+        Unblocks Windows keys, restoring default functionality and releasing keys in OS.
         """
         if self.win_blocked:
             logger.info("Restoring Windows keys (left/right) functionality.")
@@ -119,5 +119,13 @@ class HotkeyManager:
                 keyboard.unblock_key('left windows')
                 keyboard.unblock_key('right windows')
                 self.win_blocked = False
+                
+                # Send synthetic release events to clear the stuck modifier state in the OS.
+                # To prevent the Start Menu from showing, we wrap the releases in a synthetic Ctrl press.
+                keyboard.press('ctrl')
+                keyboard.release('left windows')
+                keyboard.release('right windows')
+                keyboard.release('ctrl')
+                logger.debug("Sent synthetic Win key release events wrapped in Ctrl.")
             except Exception as e:
                 logger.error(f"Failed to unblock Windows keys: {e}")
