@@ -76,7 +76,7 @@ def create_start_menu_shortcut():
         $iconPath = "{icon_path}"
         $appId = "Dictate"
 
-        $source = @"
+        $source = '
         using System;
         using System.Runtime.InteropServices;
         using System.Runtime.InteropServices.ComTypes;
@@ -136,7 +136,7 @@ def create_start_menu_shortcut():
                     pv.vt = 31; // VT_LPWSTR
                     pv.pointerVal = Marshal.StringToCoTaskMemUni(value);
                     return pv;
-                }
+                }}
             }}
 
             public class Creator {{
@@ -153,10 +153,10 @@ def create_start_menu_shortcut():
                     
                     var file = (IPersistFile)link;
                     file.Save(shortcutPath, true);
-                }
+                }}
             }}
         }}
-        "@
+        '
 
         Add-Type -TypeDefinition $source
         [ShortcutHelper.Creator]::Create($shortcutPath, $targetPath, $workDir, $iconPath, $appId)
