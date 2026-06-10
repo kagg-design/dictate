@@ -29,6 +29,14 @@ def paste_text(text):
         logger.error(f"Failed to copy transcribed text to clipboard: {e}")
         return
 
+    # Ensure no modifier keys are logically stuck/pressed in the OS before pasting
+    for key in ['left windows', 'right windows', 'ctrl', 'shift', 'alt']:
+        try:
+            keyboard.release(key)
+        except Exception:
+            pass
+    time.sleep(0.05)
+
     # Send global Ctrl+V keystroke to trigger native paste
     try:
         logger.debug("Sending Ctrl+V keystroke...")
@@ -38,7 +46,7 @@ def paste_text(text):
         return
 
     # Short delay to allow the active application to complete the paste action
-    time.sleep(0.1)
+    time.sleep(0.25)
 
     # Restore the previous clipboard content
     try:

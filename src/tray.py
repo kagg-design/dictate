@@ -25,6 +25,11 @@ class SystemTrayApp:
         # Thread-safe queue for processing recorded audio buffers
         self.task_queue = queue.Queue()
         self.worker_thread = None
+        
+        # Thread-safe queue and thread for sequential UI icon updates (fixes Win32 thread-affinity bugs)
+        self.ui_queue = queue.Queue()
+        self.ui_thread = None
+        
         self.running = True
         
         # Define context menu options
@@ -49,7 +54,7 @@ class SystemTrayApp:
 
     def start(self, setup_callback=None):
         """
-        Starts the worker thread and the pystray main loop.
+        Starts the worker thread, UI thread, and the pystray main loop.
         """
         logger.info("Initializing background transcription worker thread...")
         self.worker_thread = threading.Thread(
@@ -59,6 +64,15 @@ class SystemTrayApp:
         )
         self.worker_thread.start()
         logger.info("Background transcription worker started.")
+        
+        logger.info("Initializing background UI update thread...")
+        self.ui_thread = threading.Thread(
+            target=self._ui_update_loop,
+            name="UIUpdateWorker",
+            daemon=True
+        )
+        self.ui_thread.start()
+        logger.info("Background UI update thread started.")
         
         logger.info("Running pystray system tray loop (blocks main thread)...")
         # Run system tray icon (blocking call, runs tray event loop)
@@ -74,13 +88,10 @@ class SystemTrayApp:
 
     def set_state(self, state):
         """
-        Updates the tray icon state and graphic dynamically.
+        Queues the tray icon state change for the UI thread to execute.
         """
         self.state = state
-        try:
-            self.icon.icon = self._generate_icon_image(state)
-        except Exception as e:
-            logger.debug(f"Non-critical: Failed to update tray icon image: {e}")
+        self.ui_queue.put(state)
         logger.info(f"System tray state changed to: '{state.upper()}'")
 
     def toggle_pause(self, icon=None, item=None):
@@ -138,8 +149,9 @@ class SystemTrayApp:
         if self.icon:
             self.icon.stop()
             
-        # Signal worker thread termination
+        # Signal worker and UI threads termination
         self.task_queue.put(None)
+        self.ui_queue.put(None)
         
         # Invoke root main cleanup callback
         if self.on_exit_callback:
@@ -147,6 +159,34 @@ class SystemTrayApp:
                 self.on_exit_callback()
             except Exception as e:
                 logger.error(f"Error executing exit callback: {e}")
+
+    def _ui_update_loop(self):
+        """
+        Background loop running on a single dedicated thread to execute all 
+        tray icon state changes. This ensures all HICON resources are created 
+        and destroyed on the same thread, preventing Win32 cursor handle errors.
+        """
+        # First, set the initial icon state explicitly on this thread
+        try:
+            self.icon.icon = self._generate_icon_image('idle')
+        except Exception:
+            pass
+            
+        while self.running:
+            try:
+                state = self.ui_queue.get(timeout=1.0)
+                if state is None:
+                    # Termination sentinel received
+                    break
+                try:
+                    self.icon.icon = self._generate_icon_image(state)
+                except Exception as e:
+                    logger.debug(f"UI thread failed to update icon handle: {e}")
+                self.ui_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error in UI update loop: {e}")
 
     def _worker_loop(self):
         """

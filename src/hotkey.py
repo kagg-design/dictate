@@ -115,27 +115,18 @@ class HotkeyManager:
         if self.win_blocked:
             logger.info("Restoring Windows keys (left/right) functionality.")
             try:
+                # 1. Unblock keys so that future physical and virtual events reach the OS
                 keyboard.unblock_key('left windows')
                 keyboard.unblock_key('right windows')
                 self.win_blocked = False
                 
-                # Send native Windows API release events to clear the stuck modifier state in the OS.
-                # To prevent the Start Menu from showing, we wrap the releases in a synthetic Ctrl press.
-                import ctypes
-                VK_LWIN = 0x5B
-                VK_RWIN = 0x5C
-                VK_CONTROL = 0x11
-                KEYEVENTF_KEYUP = 0x0002
-                KEYEVENTF_EXTENDEDKEY = 0x0001
+                # 2. Programmatically release Win keys wrapped in a Ctrl press to suppress the Start Menu.
+                # The keyboard library handles scan codes and extended keys correctly under Windows.
+                keyboard.press('ctrl')
+                keyboard.release('left windows')
+                keyboard.release('right windows')
+                keyboard.release('ctrl')
                 
-                # Press Ctrl
-                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
-                # Release Win keys (extended keys)
-                ctypes.windll.user32.keybd_event(VK_LWIN, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
-                ctypes.windll.user32.keybd_event(VK_RWIN, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
-                # Release Ctrl
-                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-                
-                logger.debug("Sent native Windows API Win key release events wrapped in Ctrl.")
+                logger.debug("Sent keyboard library Win key release events wrapped in Ctrl.")
             except Exception as e:
                 logger.error(f"Failed to unblock Windows keys: {e}")

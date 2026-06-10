@@ -1,4 +1,12 @@
 import sys
+import os
+
+# Redirect standard streams to null when running under pythonw to avoid crashes from warning prints
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w')
+
 import threading
 from src.logger import logger
 from src.config import load_config
@@ -7,7 +15,50 @@ from src.transcriber import WhisperTranscriber
 from src.hotkey import HotkeyManager
 from src.tray import SystemTrayApp
 
+import ctypes
+
+# Keep mutex reference alive for the lifetime of the process
+_app_mutex = None
+
+def check_single_instance():
+    global _app_mutex
+    # Unique mutex name for this user application session
+    mutex_name = "Global\\DictateLocalPTTAppMutex_igerg"
+    
+    kernel32 = ctypes.windll.kernel32
+    ERROR_ALREADY_EXISTS = 183
+    
+    try:
+        _app_mutex = kernel32.CreateMutexW(None, True, mutex_name)
+        last_error = kernel32.GetLastError()
+        
+        if last_error == ERROR_ALREADY_EXISTS:
+            if _app_mutex:
+                kernel32.CloseHandle(_app_mutex)
+                _app_mutex = None
+            return False
+    except Exception as e:
+        # Fallback to true if mutex creation fails for permission reasons
+        return True
+    return True
+
+def show_already_running_message():
+    try:
+        # MB_OK = 0x00000000 | MB_ICONINFORMATION = 0x00000040
+        ctypes.windll.user32.MessageBoxW(
+            0, 
+            "Another instance of Dictate is already running. Check your system tray.", 
+            "Dictate Already Running", 
+            0x00000040
+        )
+    except Exception:
+        pass
+
 def main():
+    if not check_single_instance():
+        show_already_running_message()
+        sys.exit(0)
+
     logger.info("Starting Dictate application...")
     
     # 1. Load configuration
