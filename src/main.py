@@ -55,6 +55,13 @@ def show_already_running_message():
         pass
 
 def main():
+    # Set explicit App User Model ID so Windows associates notifications with "Dictate" instead of "Python"
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Dictate")
+    except Exception:
+        pass
+
     if not check_single_instance():
         show_already_running_message()
         sys.exit(0)
@@ -167,7 +174,13 @@ def main():
         logger.info("Application cleanup completed.")
 
     # 6. Instantiate System Tray Application
-    tray_app = SystemTrayApp(transcriber, recorder, hotkey_manager, on_exit)
+    tray_app = SystemTrayApp(
+        transcriber, 
+        recorder, 
+        hotkey_manager, 
+        on_exit,
+        show_notifications=config.get("show_notifications", True)
+    )
 
     # 7. Define asynchronous setup task for loading the model and starting listeners
     def async_init(icon):
