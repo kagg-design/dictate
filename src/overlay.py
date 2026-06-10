@@ -5,16 +5,24 @@ from src.logger import logger
 class RecordingOverlay:
     def __init__(self, show_overlay_indicator=True):
         """
-        Manages a borderless floating overlay window that pulses red 
-        to indicate active audio recording.
+        Manages an elegant, frameless, and fully transparent floating overlay icon 
+        centered at the bottom of the screen (just above the taskbar) that pulses 
+        neon red during recording.
         """
         self.show_overlay_indicator = show_overlay_indicator
         self.root = None
         self.window = None
         self.thread = None
-        self.circle = None
-        self.pulse_radius = 12
-        self.pulse_growing = True
+        
+        # UI Elements for drawing microphone
+        self.canvas = None
+        self.capsule = None
+        self.cradle = None
+        self.stem = None
+        self.base = None
+        
+        self.pulse_val = 0.0
+        self.pulse_direction = 1
         
     def start(self):
         """
@@ -24,7 +32,7 @@ class RecordingOverlay:
             logger.info("Overlay recording indicator disabled by configuration.")
             return
             
-        logger.info("Initializing visual overlay indicator thread...")
+        logger.info("Initializing minimalist visual overlay indicator thread...")
         self.thread = threading.Thread(
             target=self._run_loop, 
             name="OverlayUIThread", 
@@ -37,58 +45,58 @@ class RecordingOverlay:
             self.root = tk.Tk()
             self.root.withdraw()  # Withdraw the root window helper
             
-            # Create borderless floating widget
+            # Create borderless topmost window
             self.window = tk.Toplevel(self.root)
             self.window.overrideredirect(True)
             self.window.attributes("-topmost", True)
-            self.window.attributes("-alpha", 0.92)  # Slight transparency for premium feel
-            self.window.configure(bg="#181818")
             
-            # Position widget at the bottom right, above standard taskbar notifications
+            # Setup color key transparency on Windows (makes background completely transparent)
+            trans_color = "#181818"
+            self.window.configure(bg=trans_color)
+            self.window.wm_attributes("-transparentcolor", trans_color)
+            
+            # Position widget centered horizontally, just above the taskbar
             screen_width = self.window.winfo_screenwidth()
             screen_height = self.window.winfo_screenheight()
             
-            width = 160
-            height = 44
-            x = screen_width - width - 20
-            y = screen_height - height - 70
+            # Compact 60x60 transparent window
+            width = 60
+            height = 60
+            x = (screen_width - width) // 2
+            y = screen_height - height - 65  # Directly above the Windows taskbar
             
             self.window.geometry(f"{width}x{height}+{x}+{y}")
             
-            # Draw thin accent border frame
-            border_frame = tk.Frame(self.window, bg="#333333", bd=1)
-            border_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
-            
-            content_frame = tk.Frame(border_frame, bg="#181818")
-            content_frame.place(x=1, y=1, width=width-2, height=height-2)
-            
-            # Canvas for pulsing recording dot
+            # Canvas covering the entire window
             self.canvas = tk.Canvas(
-                content_frame, 
-                width=28, 
-                height=28, 
-                bg="#181818", 
+                self.window, 
+                width=width, 
+                height=height, 
+                bg=trans_color, 
                 highlightthickness=0
             )
-            self.canvas.pack(side=tk.LEFT, padx=(10, 5))
+            self.canvas.pack()
             
-            # Red pulse circle
-            self.circle = self.canvas.create_oval(4, 4, 24, 24, fill="#ff3333", outline="")
+            # Draw a sleek neon microphone shape
+            # 1. Capsule (center capsule x: 26-34, y: 14-30)
+            self.capsule = self.canvas.create_rectangle(25, 12, 35, 28, fill="#ff3333", outline="", width=0)
+            # Round the capsule corners by drawing circles on top and bottom
+            self.capsule_top = self.canvas.create_oval(25, 7, 35, 17, fill="#ff3333", outline="")
+            self.capsule_bottom = self.canvas.create_oval(25, 23, 35, 33, fill="#ff3333", outline="")
             
-            # Notification label
-            self.label = tk.Label(
-                content_frame, 
-                text="RECORDING", 
-                fg="#f0f0f0", 
-                bg="#181818", 
-                font=("Segoe UI", 10, "bold")
-            )
-            self.label.pack(side=tk.LEFT, padx=5)
+            # 2. Cradle (arc around capsule)
+            self.cradle = self.canvas.create_arc(20, 16, 40, 36, start=180, extent=180, style=tk.ARC, outline="#ff3333", width=3)
+            
+            # 3. Stem (vertical support line)
+            self.stem = self.canvas.create_line(30, 36, 30, 44, fill="#ff3333", width=3)
+            
+            # 4. Base plate (horizontal line)
+            self.base = self.canvas.create_line(22, 44, 38, 44, fill="#ff3333", width=3)
             
             # Start hidden
             self.window.withdraw()
             
-            # Start pulse animation
+            # Start elegant breathing pulse animation
             self._animate_pulse()
             
             self.root.mainloop()
@@ -97,30 +105,28 @@ class RecordingOverlay:
             
     def _animate_pulse(self):
         if self.window and self.window.winfo_exists():
-            # Update pulse radius
-            if self.pulse_growing:
-                self.pulse_radius += 0.8
-                if self.pulse_radius >= 13:
-                    self.pulse_growing = False
-            else:
-                self.pulse_radius -= 0.8
-                if self.pulse_radius <= 7:
-                    self.pulse_growing = True
-                    
-            center = 14
-            self.canvas.coords(
-                self.circle,
-                center - self.pulse_radius,
-                center - self.pulse_radius,
-                center + self.pulse_radius,
-                center + self.pulse_radius
-            )
+            # Breathe pulse calculations (sinusoidal modulation)
+            self.pulse_val += self.pulse_direction * 0.08
+            if self.pulse_val >= 1.0:
+                self.pulse_val = 1.0
+                self.pulse_direction = -1
+            elif self.pulse_val <= 0.0:
+                self.pulse_val = 0.0
+                self.pulse_direction = 1
+                
+            # Breathing brightness: between dark crimson (#801a1a) and bright red (#ff3333)
+            r = int(128 + self.pulse_val * 127)
+            g = int(26 + self.pulse_val * 25)
+            b = int(26 + self.pulse_val * 25)
+            color = f"#{r:02x}{g:02x}{b:02x}"
             
-            # Smoothly transition color intensity
-            brightness = int(180 + (self.pulse_radius - 7) * 12)
-            brightness = min(max(brightness, 100), 255)
-            color = f"#{brightness:02x}1a1a"
-            self.canvas.itemconfig(self.circle, fill=color)
+            # Apply color to all parts of the microphone
+            self.canvas.itemconfig(self.capsule, fill=color)
+            self.canvas.itemconfig(self.capsule_top, fill=color, outline=color)
+            self.canvas.itemconfig(self.capsule_bottom, fill=color, outline=color)
+            self.canvas.itemconfig(self.cradle, outline=color)
+            self.canvas.itemconfig(self.stem, fill=color)
+            self.canvas.itemconfig(self.base, fill=color)
             
             self.root.after(40, self._animate_pulse)
             
@@ -142,7 +148,6 @@ class RecordingOverlay:
         try:
             if self.window:
                 self.window.deiconify()
-                # Lift to top again to handle overlapping windows
                 self.window.lift()
         except Exception as e:
             logger.debug(f"Failed to show overlay window: {e}")

@@ -55,6 +55,42 @@ def show_already_running_message():
     except Exception:
         pass
 
+def create_start_menu_shortcut():
+    try:
+        import subprocess
+        import os
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return
+            
+        shortcut_path = os.path.join(appdata, r"Microsoft\Windows\Start Menu\Programs\Dictate.lnk")
+        project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        target_path = os.path.join(project_dir, "run.bat")
+        icon_path = os.path.join(project_dir, "icon.ico")
+        
+        # Check if shortcut already exists to avoid spawning powershell needlessly
+        if os.path.exists(shortcut_path):
+            return
+            
+        ps_script = f"""
+        $WshShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut("{shortcut_path}")
+        $Shortcut.TargetPath = "{target_path}"
+        $Shortcut.WorkingDirectory = "{project_dir}"
+        $Shortcut.IconLocation = "{icon_path}"
+        $Shortcut.Save()
+        """
+        
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            creationflags=0x08000000  # CREATE_NO_WINDOW
+        )
+        logger.info(f"Start Menu shortcut created/verified at: {shortcut_path}")
+    except Exception as e:
+        logger.error(f"Failed to create Start Menu shortcut: {e}")
+
 def main():
     # Set explicit App User Model ID so Windows associates notifications with "Dictate" instead of "Python"
     try:
@@ -62,6 +98,9 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Dictate")
     except Exception:
         pass
+
+    # Ensure shortcut exists in the Start Menu so Windows can fetch the Dictate app icon
+    create_start_menu_shortcut()
 
     if not check_single_instance():
         show_already_running_message()
