@@ -119,12 +119,23 @@ class HotkeyManager:
                 keyboard.unblock_key('right windows')
                 self.win_blocked = False
                 
-                # Send synthetic release events to clear the stuck modifier state in the OS.
+                # Send native Windows API release events to clear the stuck modifier state in the OS.
                 # To prevent the Start Menu from showing, we wrap the releases in a synthetic Ctrl press.
-                keyboard.press('ctrl')
-                keyboard.release('left windows')
-                keyboard.release('right windows')
-                keyboard.release('ctrl')
-                logger.debug("Sent synthetic Win key release events wrapped in Ctrl.")
+                import ctypes
+                VK_LWIN = 0x5B
+                VK_RWIN = 0x5C
+                VK_CONTROL = 0x11
+                KEYEVENTF_KEYUP = 0x0002
+                KEYEVENTF_EXTENDEDKEY = 0x0001
+                
+                # Press Ctrl
+                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
+                # Release Win keys (extended keys)
+                ctypes.windll.user32.keybd_event(VK_LWIN, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+                ctypes.windll.user32.keybd_event(VK_RWIN, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+                # Release Ctrl
+                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+                
+                logger.debug("Sent native Windows API Win key release events wrapped in Ctrl.")
             except Exception as e:
                 logger.error(f"Failed to unblock Windows keys: {e}")
