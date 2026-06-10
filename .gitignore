@@ -21,3 +21,7 @@ logs/
 # Audio scratch files
 *.wav
 *.mp3
+
+# Standard streams redirection logs
+stdout.txt
+stderr.txt
