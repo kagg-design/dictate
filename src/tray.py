@@ -47,7 +47,7 @@ class SystemTrayApp:
             menu=self.menu
         )
 
-    def start(self):
+    def start(self, setup_callback=None):
         """
         Starts the worker thread and the pystray main loop.
         """
@@ -62,7 +62,15 @@ class SystemTrayApp:
         
         logger.info("Running pystray system tray loop (blocks main thread)...")
         # Run system tray icon (blocking call, runs tray event loop)
-        self.icon.run()
+        if setup_callback:
+            def setup_wrapper(icon):
+                logger.info("Setting tray icon visibility to True in setup wrapper...")
+                icon.visible = True
+                setup_callback(icon)
+            self.icon.run(setup=setup_wrapper)
+        else:
+            self.icon.visible = True
+            self.icon.run()
 
     def set_state(self, state):
         """
@@ -179,10 +187,10 @@ class SystemTrayApp:
 
     def _generate_icon_image(self, state):
         """
-        Procedurally draws high-resolution pixel art microphone icons.
+        Procedurally draws high-resolution pixel art microphone icons (32x32).
         """
-        # Create transparent canvas
-        image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+        # Create transparent canvas (32x32 is native and extremely stable on Windows tray)
+        image = Image.new('RGBA', (32, 32), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         
         # State styling definitions
@@ -197,23 +205,23 @@ class SystemTrayApp:
         else:
             color = (240, 240, 240, 255)
             
-        # Draw Microphone Shape:
-        # 1. Rounded rectangle capsule (Center x: 32, y range: 12-36)
-        draw.rounded_rectangle([24, 12, 40, 36], radius=8, fill=color)
+        # Draw Microphone Shape in 32x32 canvas:
+        # 1. Rounded rectangle capsule (Center x: 16, y range: 6-18)
+        draw.rounded_rectangle([12, 6, 20, 18], radius=4, fill=color)
         
         # 2. Stand cradle (horizontal circle arc under capsule)
-        draw.arc([18, 20, 46, 44], start=0, end=180, fill=color, width=4)
+        draw.arc([9, 10, 23, 22], start=0, end=180, fill=color, width=2)
         
         # 3. Support stem (vertical line connecting base and cradle)
-        draw.line([32, 44, 32, 52], fill=color, width=4)
+        draw.line([16, 22, 16, 26], fill=color, width=2)
         
         # 4. Base stand (horizontal plate)
-        draw.line([22, 52, 42, 52], fill=color, width=4)
+        draw.line([11, 26, 21, 26], fill=color, width=2)
         
         # Draw status dot in top-right area for active states
         if state == 'recording':
-            draw.ellipse([46, 6, 56, 16], fill=(255, 0, 0, 255))
+            draw.ellipse([23, 3, 28, 8], fill=(255, 0, 0, 255))
         elif state == 'transcribing':
-            draw.ellipse([46, 6, 56, 16], fill=(0, 191, 255, 255))
+            draw.ellipse([23, 3, 28, 8], fill=(0, 191, 255, 255))
             
         return image

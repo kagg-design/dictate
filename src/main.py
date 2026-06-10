@@ -165,7 +165,7 @@ def main():
     # 8. Start system tray (blocks main thread until exited)
     # The async_init runs on a background thread automatically once the tray is ready
     try:
-        tray_app.icon.run(setup=async_init)
+        tray_app.start(setup_callback=async_init)
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received. Shutting down.")
         tray_app.exit_app()
