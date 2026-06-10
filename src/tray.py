@@ -77,7 +77,10 @@ class SystemTrayApp:
         Updates the tray icon state and graphic dynamically.
         """
         self.state = state
-        self.icon.icon = self._generate_icon_image(state)
+        try:
+            self.icon.icon = self._generate_icon_image(state)
+        except Exception as e:
+            logger.debug(f"Non-critical: Failed to update tray icon image: {e}")
         logger.info(f"System tray state changed to: '{state.upper()}'")
 
     def toggle_pause(self, icon=None, item=None):
