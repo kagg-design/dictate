@@ -205,7 +205,7 @@ def main():
             "model_name": "large-v3-turbo",
             "device": "cuda",
             "compute_type": "float16",
-            "max_duration": 60,
+            "max_duration": 600,
             "sample_rate": 16000,
             "min_duration": 0.3
         }
@@ -219,7 +219,7 @@ def main():
     
     recorder = AudioRecorder(
         sample_rate=config.get("sample_rate", 16000),
-        max_duration=config.get("max_duration", 60),
+        max_duration=config.get("max_duration", 600),
         min_duration=config.get("min_duration", 0.3)
     )
 

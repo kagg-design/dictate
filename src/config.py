@@ -9,7 +9,7 @@ DEFAULT_CONFIG = {
     "model_name": "large-v3-turbo",
     "device": "cuda",
     "compute_type": "float16",
-    "max_duration": 60,      # 60 seconds hard cap
+    "max_duration": 600,      # 600 seconds hard cap
     "sample_rate": 16000,    # 16 kHz mono
     "min_duration": 0.3,     # discard shorter than 300 ms
     "show_startup_notifications": True,
