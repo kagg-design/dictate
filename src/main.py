@@ -68,26 +68,110 @@ def create_start_menu_shortcut():
         target_path = os.path.join(project_dir, "run.bat")
         icon_path = os.path.join(project_dir, "icon.ico")
         
-        # Check if shortcut already exists to avoid spawning powershell needlessly
-        if os.path.exists(shortcut_path):
-            return
-            
+        # We always verify/overwrite to keep paths fresh
         ps_script = f"""
-        $WshShell = New-Object -ComObject WScript.Shell
-        $Shortcut = $WshShell.CreateShortcut("{shortcut_path}")
-        $Shortcut.TargetPath = "{target_path}"
-        $Shortcut.WorkingDirectory = "{project_dir}"
-        $Shortcut.IconLocation = "{icon_path}"
-        $Shortcut.Save()
+        $shortcutPath = "{shortcut_path}"
+        $targetPath = "{target_path}"
+        $workDir = "{project_dir}"
+        $iconPath = "{icon_path}"
+        $appId = "Dictate"
+
+        $source = @"
+        using System;
+        using System.Runtime.InteropServices;
+        using System.Runtime.InteropServices.ComTypes;
+
+        namespace ShortcutHelper {{
+            [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+            public class ShellLink {{}}
+
+            [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+            public interface IShellLinkW {{
+                void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszFile, int cchMaxPath, out IntPtr pfd, int fFlags);
+                void GetIDList(out IntPtr ppidl);
+                void SetIDList(IntPtr pidl);
+                void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszName, int cchMaxName);
+                void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+                void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszDir, int cchMaxPath);
+                void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+                void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszArgs, int cchMaxPath);
+                void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+                void GetHotkey(out short pwHotkey);
+                void SetHotkey(short wHotkey);
+                void GetShowCmd(out int piShowCmd);
+                void SetShowCmd(int iShowCmd);
+                void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszIconPath, int cchMaxPath, out int piIcon);
+                void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+                void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, int dwReserved);
+                void Resolve(IntPtr hwnd, int fFlags);
+                void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+            }}
+
+            [StructLayout(LayoutKind.Sequential, Pack = 4)]
+            public struct PropertyKey {{
+                public Guid fmtid;
+                public uint pid;
+                public PropertyKey(Guid guid, uint id) {{
+                    fmtid = guid;
+                    pid = id;
+                }}
+            }}
+
+            [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99")]
+            public interface IPropertyStore {{
+                void GetCount(out uint cProps);
+                void GetAt(uint iProp, out PropertyKey pkey);
+                void GetValue(ref PropertyKey pkey, [Out] PropVariant pv);
+                void SetValue(ref PropertyKey pkey, PropVariant pv);
+                void Commit();
+            }}
+
+            [StructLayout(LayoutKind.Explicit)]
+            public class PropVariant {{
+                [FieldOffset(0)] public ushort vt;
+                [FieldOffset(8)] public IntPtr pointerVal;
+                
+                public static PropVariant FromString(string value) {{
+                    var pv = new PropVariant();
+                    pv.vt = 31; // VT_LPWSTR
+                    pv.pointerVal = Marshal.StringToCoTaskMemUni(value);
+                    return pv;
+                }
+            }}
+
+            public class Creator {{
+                public static void Create(string shortcutPath, string targetPath, string workDir, string iconPath, string appId) {{
+                    var link = (IShellLinkW)new ShellLink();
+                    link.SetPath(targetPath);
+                    link.SetWorkingDirectory(workDir);
+                    link.SetIconLocation(iconPath, 0);
+                    
+                    var store = (IPropertyStore)link;
+                    var appIdKey = new PropertyKey(new Guid("9F4C6855-37D7-4F77-8032-D58D506DB13B"), 5);
+                    store.SetValue(ref appIdKey, PropVariant.FromString(appId));
+                    store.Commit();
+                    
+                    var file = (IPersistFile)link;
+                    file.Save(shortcutPath, true);
+                }
+            }}
+        }}
+        "@
+
+        Add-Type -TypeDefinition $source
+        [ShortcutHelper.Creator]::Create($shortcutPath, $targetPath, $workDir, $iconPath, $appId)
         """
         
-        subprocess.run(
+        result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True,
             text=True,
             creationflags=0x08000000  # CREATE_NO_WINDOW
         )
-        logger.info(f"Start Menu shortcut created/verified at: {shortcut_path}")
+        if result.returncode != 0:
+            logger.error(f"PowerShell shortcut creation failed: {result.stderr}")
+        else:
+            logger.info(f"Start Menu shortcut with AppUserModelID created/verified at: {shortcut_path}")
     except Exception as e:
         logger.error(f"Failed to create Start Menu shortcut: {e}")
 
