@@ -1,0 +1,23 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Config file (user-specific config)
+config.yaml
+
+# Logging directory
+logs/
+
+# IDE files
+.idea/
+.vscode/
+
+# Audio scratch files
+*.wav
+*.mp3
