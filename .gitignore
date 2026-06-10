@@ -25,3 +25,5 @@ logs/
 # Standard streams redirection logs
 stdout.txt
 stderr.txt
+crash_log.txt
+
