@@ -86,10 +86,9 @@ class HotkeyManager:
                     self.on_trigger_stop()
                 except Exception as e:
                     logger.error(f"Error executing on_trigger_stop callback: {e}")
-            
-            # Unblock the Windows keys ONLY when both keys are fully released.
-            # This prevents Windows from seeing a lone Win key release event, which opens the Start Menu.
-            if not ctrl_pressed and not win_pressed:
+                
+                # Unblock and release Windows keys immediately to prevent stuck state
+                # by the time transcription completes and paste is executed.
                 self._unblock_win_keys()
 
     def _block_win_keys(self):
