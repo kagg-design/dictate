@@ -187,41 +187,49 @@ class SystemTrayApp:
 
     def _generate_icon_image(self, state):
         """
-        Procedurally draws high-resolution pixel art microphone icons (32x32).
+        Procedurally draws high-contrast circular microphone icons (32x32).
         """
-        # Create transparent canvas (32x32 is native and extremely stable on Windows tray)
+        # Create RGBA canvas for smooth circle corners
         image = Image.new('RGBA', (32, 32), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         
-        # State styling definitions
+        # State styling definitions (background circular badge + foreground microphone)
         if state == 'idle':
-            color = (240, 240, 240, 255)       # Bright white
+            bg_color = (45, 45, 45, 255)        # Dark gray circle
+            fg_color = (240, 240, 240, 255)    # White microphone
         elif state == 'recording':
-            color = (255, 60, 60, 255)         # Neon Red
+            bg_color = (180, 10, 10, 255)       # Red circle
+            fg_color = (255, 220, 220, 255)    # Pinkish-white microphone
         elif state == 'transcribing':
-            color = (0, 191, 255, 255)         # Neon sky blue
+            bg_color = (10, 100, 180, 255)     # Sky blue circle
+            fg_color = (220, 240, 255, 255)    # Light blue microphone
         elif state == 'paused':
-            color = (128, 128, 128, 128)       # Translucent/dim gray
+            bg_color = (30, 30, 30, 180)        # Translucent dark circle
+            fg_color = (128, 128, 128, 255)    # Gray microphone
         else:
-            color = (240, 240, 240, 255)
+            bg_color = (45, 45, 45, 255)
+            fg_color = (240, 240, 240, 255)
             
-        # Draw Microphone Shape in 32x32 canvas:
-        # 1. Rounded rectangle capsule (Center x: 16, y range: 6-18)
-        draw.rounded_rectangle([12, 6, 20, 18], radius=4, fill=color)
+        # Draw background badge circle (centered, 28x28 pixels)
+        draw.ellipse([2, 2, 29, 29], fill=bg_color)
+        
+        # Draw Microphone Shape:
+        # 1. Rounded rectangle capsule (Center x: 16, y range: 8-17)
+        draw.rounded_rectangle([13, 8, 19, 17], radius=3, fill=fg_color)
         
         # 2. Stand cradle (horizontal circle arc under capsule)
-        draw.arc([9, 10, 23, 22], start=0, end=180, fill=color, width=2)
+        draw.arc([10, 11, 22, 21], start=0, end=180, fill=fg_color, width=2)
         
         # 3. Support stem (vertical line connecting base and cradle)
-        draw.line([16, 22, 16, 26], fill=color, width=2)
+        draw.line([16, 21, 16, 25], fill=fg_color, width=2)
         
         # 4. Base stand (horizontal plate)
-        draw.line([11, 26, 21, 26], fill=color, width=2)
+        draw.line([12, 25, 20, 25], fill=fg_color, width=2)
         
         # Draw status dot in top-right area for active states
         if state == 'recording':
-            draw.ellipse([23, 3, 28, 8], fill=(255, 0, 0, 255))
+            draw.ellipse([22, 5, 27, 10], fill=(255, 60, 60, 255))
         elif state == 'transcribing':
-            draw.ellipse([23, 3, 28, 8], fill=(0, 191, 255, 255))
+            draw.ellipse([22, 5, 27, 10], fill=(0, 191, 255, 255))
             
         return image
