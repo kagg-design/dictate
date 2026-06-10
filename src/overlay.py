@@ -59,11 +59,11 @@ class RecordingOverlay:
             screen_width = self.window.winfo_screenwidth()
             screen_height = self.window.winfo_screenheight()
             
-            # Compact 40x40 transparent window (30% smaller)
-            width = 40
-            height = 40
+            # Super-compact 30x30 transparent window (50% of original)
+            width = 30
+            height = 30
             x = (screen_width - width) // 2
-            y = screen_height - height - 65  # Directly above the Windows taskbar
+            y = screen_height - height - 52  # Shifted lower, closer to the taskbar top edge
             
             self.window.geometry(f"{width}x{height}+{x}+{y}")
             
@@ -77,20 +77,20 @@ class RecordingOverlay:
             )
             self.canvas.pack()
             
-            # Draw a sleek neon microphone shape scaled down to fit 40x40 window
-            # 1. Capsule (centered at x=20, y: 9-20)
-            self.capsule = self.canvas.create_rectangle(16, 9, 24, 21, fill="#ff3333", outline="", width=0)
-            self.capsule_top = self.canvas.create_oval(16, 5, 24, 13, fill="#ff3333", outline="")
-            self.capsule_bottom = self.canvas.create_oval(16, 17, 24, 25, fill="#ff3333", outline="")
+            # Draw a sleek neon microphone shape scaled down to fit 30x30 window
+            # 1. Capsule (centered at x=15, y: 7-15)
+            self.capsule = self.canvas.create_rectangle(13, 7, 17, 15, fill="#ff3333", outline="", width=0)
+            self.capsule_top = self.canvas.create_oval(13, 4, 17, 8, fill="#ff3333", outline="")
+            self.capsule_bottom = self.canvas.create_oval(13, 13, 17, 17, fill="#ff3333", outline="")
             
             # 2. Cradle (arc around capsule)
-            self.cradle = self.canvas.create_arc(12, 11, 28, 27, start=180, extent=180, style=tk.ARC, outline="#ff3333", width=2)
+            self.cradle = self.canvas.create_arc(10, 9, 20, 19, start=180, extent=180, style=tk.ARC, outline="#ff3333", width=2)
             
             # 3. Stem (vertical support line)
-            self.stem = self.canvas.create_line(20, 27, 20, 33, fill="#ff3333", width=2)
+            self.stem = self.canvas.create_line(15, 19, 15, 23, fill="#ff3333", width=2)
             
             # 4. Base plate (horizontal line)
-            self.base = self.canvas.create_line(14, 33, 26, 33, fill="#ff3333", width=2)
+            self.base = self.canvas.create_line(11, 23, 19, 23, fill="#ff3333", width=2)
             
             # Start hidden
             self.window.withdraw()
