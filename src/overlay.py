@@ -36,7 +36,7 @@ class RecordingOverlay:
         self.thread = threading.Thread(
             target=self._run_loop, 
             name="OverlayUIThread", 
-            daemon=True
+            daemon=False
         )
         self.thread.start()
         
@@ -170,5 +170,10 @@ class RecordingOverlay:
         if self.root:
             try:
                 self.root.after(0, self.root.quit)
+            except Exception:
+                pass
+        if self.thread and self.thread.is_alive():
+            try:
+                self.thread.join(timeout=2.0)
             except Exception:
                 pass
