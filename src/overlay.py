@@ -99,6 +99,11 @@ class RecordingOverlay:
             self._animate_pulse()
             
             self.root.mainloop()
+            try:
+                self.window.destroy()
+                self.root.destroy()
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Error in overlay UI event loop: {e}")
             
@@ -163,4 +168,7 @@ class RecordingOverlay:
         Cleans up and closes the overlay root window.
         """
         if self.root:
-            self.root.after(0, self.root.destroy)
+            try:
+                self.root.after(0, self.root.quit)
+            except Exception:
+                pass
