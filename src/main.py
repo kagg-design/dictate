@@ -14,6 +14,7 @@ from src.recorder import AudioRecorder
 from src.transcriber import WhisperTranscriber
 from src.hotkey import HotkeyManager
 from src.tray import SystemTrayApp
+from src.overlay import RecordingOverlay
 
 import ctypes
 
@@ -96,6 +97,11 @@ def main():
         min_duration=config.get("min_duration", 0.3)
     )
 
+    overlay = RecordingOverlay(
+        show_overlay_indicator=config.get("show_overlay_indicator", True)
+    )
+    overlay.start()
+
     # State flag to block recording until model is loaded
     model_loaded = False
     model_loading_error = False
@@ -123,6 +129,9 @@ def main():
             # Set state to recording
             tray_app.set_state('recording')
             
+            # Show visual overlay
+            overlay.show()
+            
             # Start recording and define safety timeout callback
             recorder.start(on_limit_reached=on_limit_reached)
         except Exception as e:
@@ -137,6 +146,9 @@ def main():
         nonlocal model_loaded
         if not model_loaded or not recorder.is_recording:
             return
+
+        # Hide visual overlay
+        overlay.hide()
 
         # Stop recording and fetch audio buffer
         audio = recorder.stop()
@@ -153,6 +165,10 @@ def main():
         Triggered when recording reaches the 60-second safety limit.
         """
         logger.info("Recording safety hard cap reached. Forcing stop.")
+        
+        # Hide visual overlay
+        overlay.hide()
+        
         # Stop audio capture and queue transcription
         audio = recorder.stop()
         if audio is not None:
@@ -171,6 +187,10 @@ def main():
     def on_exit():
         logger.info("Performing final application shutdown cleanup...")
         hotkey_manager.stop_listening()
+        try:
+            overlay.destroy()
+        except Exception:
+            pass
         logger.info("Application cleanup completed.")
 
     # 6. Instantiate System Tray Application
@@ -179,7 +199,7 @@ def main():
         recorder, 
         hotkey_manager, 
         on_exit,
-        show_notifications=config.get("show_notifications", True)
+        show_startup_notifications=config.get("show_startup_notifications", True)
     )
 
     # 7. Define asynchronous setup task for loading the model and starting listeners

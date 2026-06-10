@@ -6,20 +6,20 @@ from src.logger import logger
 from src.inserter import paste_text
 
 class SystemTrayApp:
-    def __init__(self, transcriber, recorder, hotkey_manager, on_exit_callback, show_notifications=True):
+    def __init__(self, transcriber, recorder, hotkey_manager, on_exit_callback, show_startup_notifications=True):
         """
         Coordinates the system tray interface, state changes, and background tasks.
         :param transcriber: WhisperTranscriber instance.
         :param recorder: AudioRecorder instance.
         :param hotkey_manager: HotkeyManager instance.
         :param on_exit_callback: Cleanup function on app shutdown.
-        :param show_notifications: Boolean flag to enable/disable tray balloon notifications.
+        :param show_startup_notifications: Boolean flag to enable/disable tray startup balloon notifications.
         """
         self.transcriber = transcriber
         self.recorder = recorder
         self.hotkey_manager = hotkey_manager
         self.on_exit_callback = on_exit_callback
-        self.show_notifications = show_notifications
+        self.show_startup_notifications = show_startup_notifications
         
         self.state = 'idle'
         self.is_paused = False
@@ -128,7 +128,7 @@ class SystemTrayApp:
         """
         Sends a balloon/toast notification to the Windows system tray.
         """
-        if not self.show_notifications:
+        if not self.show_startup_notifications:
             return
         if self.icon and pystray.Icon.HAS_NOTIFICATION:
             try:

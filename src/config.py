@@ -12,7 +12,8 @@ DEFAULT_CONFIG = {
     "max_duration": 60,      # 60 seconds hard cap
     "sample_rate": 16000,    # 16 kHz mono
     "min_duration": 0.3,     # discard shorter than 300 ms
-    "show_notifications": True
+    "show_startup_notifications": True,
+    "show_overlay_indicator": True
 }
 
 def load_config(config_path=DEFAULT_CONFIG_PATH):
