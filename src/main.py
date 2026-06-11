@@ -156,8 +156,8 @@ def create_start_menu_shortcut():
                     
                     var file = (IPersistFile)link;
                     file.Save(shortcutPath, true);
-                }
-            }
+                }}
+            }}
         }}
         '
 
