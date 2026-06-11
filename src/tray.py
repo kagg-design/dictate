@@ -53,37 +53,6 @@ class SystemTrayApp:
             title="Dictate Tool",
             menu=self.menu
         )
-
-        # Monkeypatch the pystray icon notification method on Windows to force NIIF_USER custom icon
-        if pystray.Icon.HAS_NOTIFICATION:
-            def custom_notify(message, title=None):
-                try:
-                    from pystray._util import win32
-                    # NIIF_USER = 0x00000004
-                    self.icon._message(
-                        win32.NIM_MODIFY,
-                        win32.NIF_INFO,
-                        szInfo=message,
-                        szInfoTitle=title or self.icon.title or '',
-                        dwInfoFlags=0x00000004,
-                        hBalloonIcon=self.icon._icon_handle,
-                        hIcon=self.icon._icon_handle
-                    )
-                except Exception as e:
-                    logger.error(f"Custom notify failed, falling back to default: {e}")
-                    try:
-                        from pystray._util import win32
-                        self.icon._message(
-                            win32.NIM_MODIFY,
-                            win32.NIF_INFO,
-                            szInfo=message,
-                            szInfoTitle=title or self.icon.title or ''
-                        )
-                    except Exception:
-                        pass
-            self.icon._notify = custom_notify
-
-
     def start(self, setup_callback=None):
         """
         Starts the worker thread, UI thread, and the pystray main loop.
