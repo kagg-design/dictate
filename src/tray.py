@@ -54,6 +54,36 @@ class SystemTrayApp:
             menu=self.menu
         )
 
+        # Monkeypatch the pystray icon notification method on Windows to force NIIF_USER custom icon
+        if pystray.Icon.HAS_NOTIFICATION:
+            def custom_notify(message, title=None):
+                try:
+                    from pystray._util import win32
+                    # NIIF_USER = 0x00000004
+                    self.icon._message(
+                        win32.NIM_MODIFY,
+                        win32.NIF_INFO,
+                        szInfo=message,
+                        szInfoTitle=title or self.icon.title or '',
+                        dwInfoFlags=0x00000004,
+                        hBalloonIcon=self.icon._icon_handle,
+                        hIcon=self.icon._icon_handle
+                    )
+                except Exception as e:
+                    logger.error(f"Custom notify failed, falling back to default: {e}")
+                    try:
+                        from pystray._util import win32
+                        self.icon._message(
+                            win32.NIM_MODIFY,
+                            win32.NIF_INFO,
+                            szInfo=message,
+                            szInfoTitle=title or self.icon.title or ''
+                        )
+                    except Exception:
+                        pass
+            self.icon._notify = custom_notify
+
+
     def start(self, setup_callback=None):
         """
         Starts the worker thread, UI thread, and the pystray main loop.
@@ -170,12 +200,6 @@ class SystemTrayApp:
         tray icon state changes. This ensures all HICON resources are created 
         and destroyed on the same thread, preventing Win32 cursor handle errors.
         """
-        # First, set the initial icon state explicitly on this thread
-        try:
-            self.icon.icon = self._generate_icon_image('idle')
-        except Exception:
-            pass
-            
         while self.running:
             try:
                 state = self.ui_queue.get(timeout=1.0)
@@ -234,44 +258,44 @@ class SystemTrayApp:
 
     def _generate_icon_image(self, state):
         """
-        Procedurally draws high-contrast circular microphone icons (32x32).
+        Procedurally draws high-contrast rounded square microphone icons (32x32).
         """
         # Create RGBA canvas for smooth circle corners
         image = Image.new('RGBA', (32, 32), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         
-        # State styling definitions (background circular badge + foreground microphone)
+        # State styling definitions (background rounded square badge + foreground microphone)
         if state == 'idle':
-            bg_color = (45, 45, 45, 255)        # Dark gray circle
-            fg_color = (240, 240, 240, 255)    # White microphone
+            bg_color = (51, 58, 77, 255)        # Dark bluish-gray matching icon.png
+            fg_color = (172, 255, 255, 255)    # Light cyan matching icon.png
         elif state == 'recording':
-            bg_color = (180, 10, 10, 255)       # Red circle
+            bg_color = (180, 10, 10, 255)       # Red square
             fg_color = (255, 220, 220, 255)    # Pinkish-white microphone
         elif state == 'transcribing':
-            bg_color = (10, 100, 180, 255)     # Sky blue circle
+            bg_color = (10, 100, 180, 255)     # Sky blue square
             fg_color = (220, 240, 255, 255)    # Light blue microphone
         elif state == 'paused':
-            bg_color = (30, 30, 30, 180)        # Translucent dark circle
+            bg_color = (30, 30, 30, 180)        # Translucent dark square
             fg_color = (128, 128, 128, 255)    # Gray microphone
         else:
-            bg_color = (45, 45, 45, 255)
-            fg_color = (240, 240, 240, 255)
+            bg_color = (51, 58, 77, 255)
+            fg_color = (172, 255, 255, 255)
             
-        # Draw background badge circle (centered, 28x28 pixels)
-        draw.ellipse([2, 2, 29, 29], fill=bg_color)
+        # Draw background badge rounded rectangle (centered, 28x28 pixels)
+        draw.rounded_rectangle([2, 2, 29, 29], radius=6, fill=bg_color)
         
         # Draw Microphone Shape:
-        # 1. Rounded rectangle capsule (Center x: 16, y range: 8-17)
-        draw.rounded_rectangle([13, 8, 19, 17], radius=3, fill=fg_color)
+        # 1. Elongated rounded rectangle capsule (Center x: 15.5, y range: 4-15)
+        draw.rounded_rectangle([13, 4, 18, 15], radius=3, fill=fg_color)
         
-        # 2. Stand cradle (horizontal circle arc under capsule)
-        draw.arc([10, 11, 22, 21], start=0, end=180, fill=fg_color, width=2)
+        # 2. Stand cradle (horizontal circle arc under capsule, sides hugging higher)
+        draw.arc([10, 9, 21, 20], start=-20, end=200, fill=fg_color, width=2)
         
         # 3. Support stem (vertical line connecting base and cradle)
-        draw.line([16, 21, 16, 25], fill=fg_color, width=2)
+        draw.line([16, 20, 16, 25], fill=fg_color, width=2)
         
         # 4. Base stand (horizontal plate)
-        draw.line([12, 25, 20, 25], fill=fg_color, width=2)
+        draw.line([12, 25, 19, 25], fill=fg_color, width=2)
         
         # Draw status dot in top-right area for active states
         if state == 'recording':

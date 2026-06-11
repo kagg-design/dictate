@@ -40,6 +40,20 @@ class RecordingOverlay:
         )
         self.thread.start()
         
+    def _draw_rounded_border(self, canvas, x1, y1, x2, y2, r, color, width=2):
+        self.border_arcs = []
+        self.border_lines = []
+        # Arcs
+        self.border_arcs.append(canvas.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90, style=tk.ARC, outline=color, width=width))
+        self.border_arcs.append(canvas.create_arc(x2 - 2*r, y1, x2, y1 + 2*r, start=0, extent=90, style=tk.ARC, outline=color, width=width))
+        self.border_arcs.append(canvas.create_arc(x1, y2 - 2*r, x1 + 2*r, y2, start=180, extent=90, style=tk.ARC, outline=color, width=width))
+        self.border_arcs.append(canvas.create_arc(x2 - 2*r, y2 - 2*r, x2, y2, start=270, extent=90, style=tk.ARC, outline=color, width=width))
+        # Lines
+        self.border_lines.append(canvas.create_line(x1 + r, y1, x2 - r, y1, fill=color, width=width))
+        self.border_lines.append(canvas.create_line(x1 + r, y2, x2 - r, y2, fill=color, width=width))
+        self.border_lines.append(canvas.create_line(x1, y1 + r, x1, y2 - r, fill=color, width=width))
+        self.border_lines.append(canvas.create_line(x2, y1 + r, x2, y2 - r, fill=color, width=width))
+
     def _run_loop(self):
         try:
             self.root = tk.Tk()
@@ -77,20 +91,23 @@ class RecordingOverlay:
             )
             self.canvas.pack()
             
-            # Draw a sleek neon microphone shape scaled down to fit 30x30 window
-            # 1. Capsule (centered at x=15, y: 7-15)
-            self.capsule = self.canvas.create_rectangle(13, 7, 17, 15, fill="#ff3333", outline="", width=0)
-            self.capsule_top = self.canvas.create_oval(13, 4, 17, 8, fill="#ff3333", outline="")
-            self.capsule_bottom = self.canvas.create_oval(13, 13, 17, 17, fill="#ff3333", outline="")
+            # Draw background badge rounded rectangle border (centered, 26x26 pixels, transparent fill)
+            self._draw_rounded_border(self.canvas, 2, 2, 28, 28, 5, "#ff3333", width=2)
             
-            # 2. Cradle (arc around capsule)
-            self.cradle = self.canvas.create_arc(10, 9, 20, 19, start=180, extent=180, style=tk.ARC, outline="#ff3333", width=2)
+            # Draw a sleek neon microphone shape scaled down to match icon proportions
+            # 1. Elongated capsule (centered at x=15, y range: 5-16)
+            self.capsule = self.canvas.create_rectangle(12, 8, 18, 13, fill="#ff3333", outline="", width=0)
+            self.capsule_top = self.canvas.create_oval(12, 5, 18, 11, fill="#ff3333", outline="", width=0)
+            self.capsule_bottom = self.canvas.create_oval(12, 10, 18, 16, fill="#ff3333", outline="", width=0)
             
-            # 3. Stem (vertical support line)
-            self.stem = self.canvas.create_line(15, 19, 15, 23, fill="#ff3333", width=2)
+            # 2. Stand cradle (arc around capsule, sides hugging higher)
+            self.cradle = self.canvas.create_arc(9, 9, 21, 21, start=160, extent=220, style=tk.ARC, outline="#ff3333", width=2)
             
-            # 4. Base plate (horizontal line)
-            self.base = self.canvas.create_line(11, 23, 19, 23, fill="#ff3333", width=2)
+            # 3. Support stem (vertical line connecting base and cradle)
+            self.stem = self.canvas.create_line(15, 21, 15, 25, fill="#ff3333", width=2)
+            
+            # 4. Base stand (horizontal plate)
+            self.base = self.canvas.create_line(11, 25, 19, 25, fill="#ff3333", width=2)
             
             # Start hidden
             self.window.withdraw()
@@ -131,6 +148,14 @@ class RecordingOverlay:
             self.canvas.itemconfig(self.cradle, outline=color)
             self.canvas.itemconfig(self.stem, fill=color)
             self.canvas.itemconfig(self.base, fill=color)
+            
+            # Apply color to the border outline
+            if hasattr(self, 'border_arcs'):
+                for arc in self.border_arcs:
+                    self.canvas.itemconfig(arc, outline=color)
+            if hasattr(self, 'border_lines'):
+                for line in self.border_lines:
+                    self.canvas.itemconfig(line, fill=color)
             
             self.root.after(40, self._animate_pulse)
             
