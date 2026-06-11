@@ -1,5 +1,5 @@
 # PowerShell script to create a clean shortcut for Dictate on the Desktop
-# that runs pythonw.exe directly, registers the AppUserModelID (Dictate),
+# that runs pythonw.exe directly, registers the AppUserModelID (DictateApp),
 # and sets the custom microphone icon for proper Windows notification matching.
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -11,7 +11,8 @@ $ShortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) "Dictate.lnk
 $Target = Join-Path $ScriptDir ".venv\Scripts\pythonw.exe"
 $Arguments = "-m src.main"
 $IconPath = Join-Path $ScriptDir "icon.ico"
-$AppId = "Dictate"
+$AppId = "DictateApp"
+
 
 Write-Host "Creating/Updating Desktop shortcut at: $ShortcutPath"
 Write-Host "Target: $Target"

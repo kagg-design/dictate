@@ -76,7 +76,7 @@ def create_start_menu_shortcut():
         $arguments = '{arguments}'
         $workDir = '{project_dir}'
         $iconPath = '{icon_path}'
-        $appId = "Dictate"
+        $appId = "DictateApp"
 
         $source = '
         using System;
@@ -156,8 +156,8 @@ def create_start_menu_shortcut():
                     
                     var file = (IPersistFile)link;
                     file.Save(shortcutPath, true);
-                }}
-            }}
+                }
+            }
         }}
         '
 
@@ -178,16 +178,36 @@ def create_start_menu_shortcut():
     except Exception as e:
         logger.error(f"Failed to create Start Menu shortcut: {e}")
 
+def register_app_user_model_id_registry():
+    if sys.platform == 'win32':
+        try:
+            import winreg
+            project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            icon_path = os.path.join(project_dir, "icon.ico")
+            
+            key_path = r"Software\Classes\AppUserModelId\DictateApp"
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Dictate")
+                winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, icon_path)
+                winreg.SetValueEx(key, "ShowInSettings", 0, winreg.REG_DWORD, 1)
+            logger.info("Successfully registered AppUserModelID 'DictateApp' in Registry.")
+        except Exception as e:
+            logger.error(f"Failed to register AppUserModelID in registry: {e}")
+
 def main():
-    # Set explicit App User Model ID so Windows associates notifications with "Dictate" instead of "Python"
+    # Set explicit App User Model ID so Windows associates notifications with "DictateApp" instead of "Python"
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Dictate")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DictateApp")
     except Exception:
         pass
 
+    # Register in registry to ensure notification matching and custom icon display
+    register_app_user_model_id_registry()
+
     # Ensure shortcut exists in the Start Menu so Windows can fetch the Dictate app icon
     create_start_menu_shortcut()
+
 
     if not check_single_instance():
         show_already_running_message()
