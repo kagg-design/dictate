@@ -13,7 +13,10 @@ DEFAULT_CONFIG = {
     "sample_rate": 16000,    # 16 kHz mono
     "min_duration": 0.3,     # discard shorter than 300 ms
     "show_startup_notifications": True,
-    "show_overlay_indicator": True
+    "show_overlay_indicator": True,
+    "latency": 0.08,
+    "ring_buffer_duration": 0.5,
+    "vad_filter": True,
 }
 
 def load_config(config_path=DEFAULT_CONFIG_PATH):

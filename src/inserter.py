@@ -1,59 +1,131 @@
-import time
-import pyperclip
-import keyboard
+import ctypes
+import sys
+from ctypes import wintypes
+
 from src.logger import logger
 
+
+INPUT_KEYBOARD = 1
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+MAX_CODE_UNITS_PER_BATCH = 1024
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = (
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", wintypes.WPARAM),
+    )
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = (
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", wintypes.WPARAM),
+    )
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = (
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    )
+
+
+class INPUT_UNION(ctypes.Union):
+    _fields_ = (
+        ("ki", KEYBDINPUT),
+        ("mi", MOUSEINPUT),
+        ("hi", HARDWAREINPUT),
+    )
+
+
+class INPUT(ctypes.Structure):
+    _anonymous_ = ("value",)
+    _fields_ = (("type", wintypes.DWORD), ("value", INPUT_UNION))
+
+
 def paste_text(text):
-    """
-    Inserts text into the currently focused window.
-    Saves the existing clipboard, copies the new text, sends Ctrl+V, 
-    waits briefly, and restores the original clipboard content.
-    """
+    """Insert text into the focused Windows control without using the clipboard."""
     if not text:
-        logger.info("No text to insert. Skipping paste operation.")
+        logger.info("No text to insert. Skipping text insertion.")
         return
 
-    logger.info(f"Inserting text: '{text[:40]}...' (total length: {len(text)})")
-    
-    # Save current clipboard contents
-    try:
-        old_clipboard = pyperclip.paste()
-    except Exception as e:
-        logger.warning(f"Could not read from clipboard: {e}. Proceeding without recovery.")
-        old_clipboard = None
+    logger.info(f"Inserting text directly: '{text[:40]}...' (total length: {len(text)})")
 
-    # Copy the transcribed text to clipboard
-    try:
-        pyperclip.copy(text)
-    except Exception as e:
-        logger.error(f"Failed to copy transcribed text to clipboard: {e}")
+    if sys.platform != "win32":
+        logger.error("Direct text insertion is only supported on Windows.")
         return
 
-    # Ensure no modifier keys are logically stuck/pressed in the OS before pasting
-    for key in ['left windows', 'right windows', 'ctrl', 'shift', 'alt']:
-        try:
-            keyboard.release(key)
-        except Exception:
-            pass
-    time.sleep(0.05)
-
-    # Send global Ctrl+V keystroke to trigger native paste
     try:
-        logger.debug("Sending Ctrl+V keystroke...")
-        keyboard.send('ctrl+v')
+        _send_unicode_text(text)
     except Exception as e:
-        logger.error(f"Failed to simulate Ctrl+V keystroke: {e}")
-        return
+        # Do not fall back to a temporary clipboard value: that is precisely
+        # what allowed unrelated Ctrl+V operations to paste dictation text.
+        logger.error(f"Failed to insert text through Windows SendInput: {e}")
 
-    # Short delay to allow the active application to complete the paste action
-    time.sleep(0.25)
 
-    # Restore the previous clipboard content
-    try:
-        if old_clipboard:
-            pyperclip.copy(old_clipboard)
-            logger.debug("Previous clipboard content successfully restored.")
-        else:
-            pyperclip.copy('')
-    except Exception as e:
-        logger.warning(f"Failed to restore original clipboard content: {e}")
+def _send_unicode_text(text):
+    """Send UTF-16 keyboard packets in bounded batches via Win32 SendInput."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.SendInput.argtypes = (
+        wintypes.UINT,
+        ctypes.POINTER(INPUT),
+        ctypes.c_int,
+    )
+    user32.SendInput.restype = wintypes.UINT
+
+    encoded = text.encode("utf-16-le", errors="surrogatepass")
+    code_units = [
+        int.from_bytes(encoded[index:index + 2], "little")
+        for index in range(0, len(encoded), 2)
+    ]
+
+    sent_code_units = 0
+    for offset in range(0, len(code_units), MAX_CODE_UNITS_PER_BATCH):
+        batch = code_units[offset:offset + MAX_CODE_UNITS_PER_BATCH]
+        events = []
+        for code_unit in batch:
+            events.append(
+                INPUT(
+                    type=INPUT_KEYBOARD,
+                    ki=KEYBDINPUT(0, code_unit, KEYEVENTF_UNICODE, 0, 0),
+                )
+            )
+            events.append(
+                INPUT(
+                    type=INPUT_KEYBOARD,
+                    ki=KEYBDINPUT(
+                        0,
+                        code_unit,
+                        KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                        0,
+                        0,
+                    ),
+                )
+            )
+
+        event_array = (INPUT * len(events))(*events)
+        ctypes.set_last_error(0)
+        sent_events = user32.SendInput(
+            len(event_array), event_array, ctypes.sizeof(INPUT)
+        )
+        if sent_events != len(event_array):
+            error_code = ctypes.get_last_error()
+            raise OSError(
+                error_code,
+                "SendInput accepted "
+                f"{sent_events}/{len(event_array)} events after "
+                f"{sent_code_units} UTF-16 code units",
+            )
+        sent_code_units += len(batch)
+
+    logger.debug("Direct Unicode text insertion completed successfully.")

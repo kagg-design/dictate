@@ -30,10 +30,11 @@ from faster_whisper import WhisperModel
 from src.logger import logger
 
 class WhisperTranscriber:
-    def __init__(self, model_name="large-v3-turbo", device="cuda", compute_type="float16"):
+    def __init__(self, model_name="large-v3-turbo", device="cuda", compute_type="float16", vad_filter=True):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
+        self.vad_filter = vad_filter
         self.model = None
 
     def load_model(self):
@@ -76,7 +77,8 @@ class WhisperTranscriber:
             # Russian and English can be auto-detected and mixed
             segments, info = self.model.transcribe(
                 audio_float32,
-                beam_size=5
+                beam_size=5,
+                vad_filter=self.vad_filter
             )
             
             logger.info(

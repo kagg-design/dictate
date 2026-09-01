@@ -7,8 +7,8 @@ A lightweight system tray application that transcribes your voice locally using 
 - **Push-to-Talk Recording:** Press and hold `Ctrl+Win` to start recording from your default microphone; release to stop.
 - **Ultra-Fast Local Transcription:** Transcribes audio on-device using the GPU-accelerated `faster-whisper` model (`large-v3-turbo`).
 - **Mixed-Language Support:** Automatically detects the spoken language (perfect for switching between English and Russian in a single phrase).
-- **Direct Insertion:** Automatically pastes the transcribed text into whichever application is currently active.
-- **Smart Clipboard Recovery:** Restores the previous contents of your clipboard automatically after pasting.
+- **Direct Insertion:** Types transcribed text into the active Windows application using Unicode input events.
+- **Clipboard Safe:** Never replaces the system clipboard, so normal `Ctrl+V` remains independent from dictation.
 - **System Tray Control:** A simple icon showing the current state (Idle, Recording, Transcribing, Paused) with options to Pause/Resume and Exit.
 - **Safety Hard Caps:** Restricts recording to 60 seconds maximum and discards recordings under 300 ms to avoid accidental keypresses.
 

@@ -234,13 +234,16 @@ def main():
     transcriber = WhisperTranscriber(
         model_name=config.get("model_name", "large-v3-turbo"),
         device=config.get("device", "cuda"),
-        compute_type=config.get("compute_type", "float16")
+        compute_type=config.get("compute_type", "float16"),
+        vad_filter=config.get("vad_filter", True)
     )
     
     recorder = AudioRecorder(
         sample_rate=config.get("sample_rate", 16000),
         max_duration=config.get("max_duration", 600),
-        min_duration=config.get("min_duration", 0.3)
+        min_duration=config.get("min_duration", 0.3),
+        latency=config.get("latency", 0.08),
+        ring_buffer_duration=config.get("ring_buffer_duration", 0.5)
     )
 
     overlay = RecordingOverlay(
@@ -253,6 +256,11 @@ def main():
     model_loading_error = False
 
     # 3. Define hotkey trigger callbacks
+    def on_audio_start():
+        logger.info("First audio block received. Activating recording indicators.")
+        tray_app.set_state('recording')
+        overlay.show()
+
     def on_trigger_start():
         nonlocal model_loaded, model_loading_error
         if model_loading_error:
@@ -272,14 +280,11 @@ def main():
             return
 
         try:
-            # Set state to recording
-            tray_app.set_state('recording')
-            
-            # Show visual overlay
-            overlay.show()
-            
-            # Start recording and define safety timeout callback
-            recorder.start(on_limit_reached=on_limit_reached)
+            # Start recording and define safety timeout and audio start callbacks
+            recorder.start(
+                on_limit_reached=on_limit_reached,
+                on_audio_start=on_audio_start
+            )
         except Exception as e:
             logger.error(f"Failed to start recording: {e}")
             tray_app.set_state('idle')
@@ -323,8 +328,9 @@ def main():
         else:
             tray_app.set_state('idle')
             
-        # Reset the hotkey manager state so releasing the hotkey afterwards is ignored
-        hotkey_manager.is_active = False
+        # Reset the hotkey state and unblock Win even though the user may still
+        # be holding the chord when the safety limit fires.
+        hotkey_manager.cancel_active()
 
     # 4. Instantiate hotkey manager
     hotkey_manager = HotkeyManager(on_trigger_start, on_trigger_stop)
@@ -333,6 +339,10 @@ def main():
     def on_exit():
         logger.info("Performing final application shutdown cleanup...")
         hotkey_manager.stop_listening()
+        try:
+            recorder.cleanup()
+        except Exception:
+            pass
         try:
             overlay.destroy()
         except Exception:
