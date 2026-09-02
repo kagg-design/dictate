@@ -1,4 +1,5 @@
 import keyboard
+import threading
 
 from src.logger import logger
 
@@ -17,6 +18,8 @@ class HotkeyManager:
         self.win_blocked = False
         self.paused = False
         self.hook_handle = None
+        self._hook_handles = []
+        self._state_lock = threading.RLock()
 
         # Keep the sides separate so releasing one Ctrl/Win does not erase the
         # state of the other side when both are held.
@@ -24,21 +27,45 @@ class HotkeyManager:
         self._pressed_win_keys = set()
 
     def start_listening(self):
-        """Register the global keyboard hook."""
-        logger.info("Registering global keyboard hook listener...")
+        """Register Ctrl observation and selective Windows-key suppression."""
+        logger.info("Registering global modifier key hooks...")
         try:
             self._reset_key_state()
-            self.hook_handle = keyboard.hook(self._on_key_event)
-            logger.info("Global keyboard hook registered successfully.")
+            self._hook_handles = [
+                keyboard.hook_key("ctrl", self._on_ctrl_key_event),
+                keyboard.hook_key(
+                    "left windows", self._on_win_key_event, suppress=True
+                ),
+                keyboard.hook_key(
+                    "right windows", self._on_win_key_event, suppress=True
+                ),
+            ]
+            self.hook_handle = self._hook_handles[0]
+            logger.info("Global modifier key hooks registered successfully.")
         except Exception as e:
-            logger.error(f"Failed to register global keyboard hook: {e}")
+            for handle in self._hook_handles:
+                try:
+                    keyboard.unhook(handle)
+                except Exception:
+                    pass
+            self._hook_handles = []
+            self.hook_handle = None
+            logger.error(f"Failed to register global modifier key hooks: {e}")
             logger.error("Make sure to run the application with Administrator privileges.")
             raise
 
     def stop_listening(self):
         """Unregister the hook and restore the Windows keys."""
-        if self.hook_handle:
-            logger.info("Unregistering global keyboard hook listener...")
+        if self._hook_handles:
+            logger.info("Unregistering global modifier key hooks...")
+            for handle in self._hook_handles:
+                try:
+                    keyboard.unhook(handle)
+                except Exception as e:
+                    logger.error(f"Error unhooking keyboard listener: {e}")
+            self._hook_handles = []
+            self.hook_handle = None
+        elif self.hook_handle:
             try:
                 keyboard.unhook(self.hook_handle)
             except Exception as e:
@@ -72,37 +99,55 @@ class HotkeyManager:
         self._reset_key_state()
         self._unblock_win_keys()
 
-    def _on_key_event(self, event):
-        """Handle physical modifier transitions from the keyboard hook."""
+    def _on_ctrl_key_event(self, event):
+        """Handle Ctrl asynchronously through the library's regular hook path."""
         if self.paused:
             return
 
-        name = event.name
-        if name in self.CTRL_NAMES:
-            self._update_pressed_keys(self._pressed_ctrl_keys, event)
-        elif name in self.WIN_NAMES:
-            self._update_pressed_keys(self._pressed_win_keys, event)
-        else:
-            return
+        self._handle_modifier_event(event)
 
-        chord_pressed = bool(self._pressed_ctrl_keys and self._pressed_win_keys)
-        if chord_pressed and not self.is_active:
-            logger.info("Hotkey combination triggered: Ctrl+Win are now held down.")
-            self.is_active = True
-            self._block_win_keys()
-            try:
-                self.on_trigger_start()
-            except Exception as e:
-                logger.error(f"Error executing on_trigger_start callback: {e}")
-        elif not chord_pressed and self.is_active:
-            logger.info("Hotkey combination released: Ctrl or Win has been released.")
-            self.is_active = False
-            try:
-                self.on_trigger_stop()
-            except Exception as e:
-                logger.error(f"Error executing on_trigger_stop callback: {e}")
-            finally:
-                self._unblock_win_keys()
+    def _on_win_key_event(self, event):
+        """Observe every Win transition before selectively suppressing it."""
+        if self.paused:
+            return True
+
+        with self._state_lock:
+            was_active = self.is_active
+            self._handle_modifier_event(event)
+
+            # Suppress Win while entering, holding, or leaving the PTT chord.
+            # The callback still observes key-up, unlike keyboard.block_key().
+            return not (was_active or self.is_active)
+
+    def _handle_modifier_event(self, event):
+        """Update physical modifier state and transition the PTT session."""
+        with self._state_lock:
+            name = event.name
+            if name in self.CTRL_NAMES:
+                self._update_pressed_keys(self._pressed_ctrl_keys, event)
+            elif name in self.WIN_NAMES:
+                self._update_pressed_keys(self._pressed_win_keys, event)
+            else:
+                return
+
+            chord_pressed = bool(self._pressed_ctrl_keys and self._pressed_win_keys)
+            if chord_pressed and not self.is_active:
+                logger.info("Hotkey combination triggered: Ctrl+Win are now held down.")
+                self.is_active = True
+                self._block_win_keys()
+                try:
+                    self.on_trigger_start()
+                except Exception as e:
+                    logger.error(f"Error executing on_trigger_start callback: {e}")
+            elif not chord_pressed and self.is_active:
+                logger.info("Hotkey combination released: Ctrl or Win has been released.")
+                self.is_active = False
+                try:
+                    self.on_trigger_stop()
+                except Exception as e:
+                    logger.error(f"Error executing on_trigger_stop callback: {e}")
+                finally:
+                    self._unblock_win_keys()
 
     @staticmethod
     def _update_pressed_keys(pressed_keys, event):
@@ -119,30 +164,20 @@ class HotkeyManager:
         self._pressed_win_keys.clear()
 
     def _block_win_keys(self):
-        """Block Windows-key events while the push-to-talk chord is active."""
+        """Mark Win events for suppression by the permanent blocking hook."""
         if self.win_blocked:
             return
 
-        logger.info("Temporarily blocking Windows keys (left/right) from reaching OS.")
-        try:
-            keyboard.block_key("left windows")
-            keyboard.block_key("right windows")
-            self.win_blocked = True
-        except Exception as e:
-            logger.warning(
-                f"Could not block Windows keys: {e}. "
-                "Start Menu suppression may not work. Run as Administrator to resolve."
-            )
+        logger.info("Suppressing Windows-key events for the active PTT chord.")
+        self.win_blocked = True
 
     def _unblock_win_keys(self):
         """Restore Windows keys and release their suppressed OS state."""
         if not self.win_blocked:
             return
 
-        logger.info("Restoring Windows keys (left/right) functionality.")
+        logger.info("Ending Windows-key event suppression.")
         try:
-            keyboard.unblock_key("left windows")
-            keyboard.unblock_key("right windows")
             self.win_blocked = False
 
             # keyboard marks these generated events as replay events and does

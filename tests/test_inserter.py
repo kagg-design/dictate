@@ -22,12 +22,78 @@ class TextInserterTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(inserter.INPUT), expected_size)
 
     def test_paste_text_uses_direct_insertion(self):
-        with patch.object(inserter.sys, "platform", "win32"), patch.object(
-            inserter, "_send_unicode_text"
-        ) as send_unicode:
+        call_order = []
+        with (
+            patch.object(inserter.sys, "platform", "win32"),
+            patch.object(
+                inserter,
+                "_wait_for_modifiers_released",
+                side_effect=lambda: call_order.append("wait"),
+            ) as wait_for_release,
+            patch.object(
+                inserter,
+                "_send_unicode_text",
+                side_effect=lambda text: call_order.append("send"),
+            ) as send_unicode,
+        ):
             inserter.paste_text("Привет")
 
-        send_unicode.assert_called_once_with("Привет")
+        wait_for_release.assert_called_once_with()
+        send_unicode.assert_called_once_with("Привет ")
+        self.assertEqual(call_order, ["wait", "send"])
+
+    def test_consecutive_dictations_have_a_single_space_between_them(self):
+        inserted = []
+        with (
+            patch.object(inserter.sys, "platform", "win32"),
+            patch.object(inserter, "_wait_for_modifiers_released"),
+            patch.object(
+                inserter, "_send_unicode_text", side_effect=inserted.append
+            ),
+        ):
+            inserter.paste_text("Что будет")
+            inserter.paste_text("Ага")
+
+        self.assertEqual("".join(inserted), "Что будет Ага ")
+
+    def test_existing_trailing_whitespace_is_not_duplicated(self):
+        with (
+            patch.object(inserter.sys, "platform", "win32"),
+            patch.object(inserter, "_wait_for_modifiers_released"),
+            patch.object(inserter, "_send_unicode_text") as send_unicode,
+        ):
+            inserter.paste_text("Уже есть пробел ")
+
+        send_unicode.assert_called_once_with("Уже есть пробел ")
+
+    def test_modifier_wait_requires_stable_released_state(self):
+        fake_get_state = Mock()
+        fake_user32 = Mock()
+        fake_user32.GetAsyncKeyState = fake_get_state
+        modifier_states = iter(
+            [
+                ("Ctrl",),
+                (),
+                ("Ctrl",),
+                (),
+                (),
+                (),
+            ]
+        )
+
+        with (
+            patch.object(inserter.ctypes, "WinDLL", return_value=fake_user32),
+            patch.object(
+                inserter,
+                "_pressed_modifier_names",
+                side_effect=lambda user32: next(modifier_states),
+            ) as pressed_modifiers,
+            patch.object(inserter.time, "sleep") as sleep,
+        ):
+            inserter._wait_for_modifiers_released()
+
+        self.assertEqual(pressed_modifiers.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
 
     def test_utf16_surrogate_pairs_are_sent_as_key_down_up_packets(self):
         fake_send_input = FakeSendInput()
