@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import numpy as np
 
 # Attempt to resolve NVIDIA CUDA DLL paths for faster-whisper on Windows before imports
@@ -68,6 +69,7 @@ class WhisperTranscriber:
             raise RuntimeError("Whisper model is not loaded. Call load_model() first.")
 
         logger.info("Initiating transcription of recorded audio buffer...")
+        started = time.perf_counter()
         
         # Convert audio buffer from int16 to float32 and normalize to [-1.0, 1.0]
         audio_float32 = audio_int16.flatten().astype(np.float32) / 32768.0
@@ -92,7 +94,12 @@ class WhisperTranscriber:
                 text_segments.append(segment.text)
                 
             transcribed_text = "".join(text_segments).strip()
-            logger.info(f"Transcription completed. Characters: {len(transcribed_text)}")
+            logger.info(
+                "Transcription completed. Characters: %d, elapsed: %.3fs, device: %s",
+                len(transcribed_text),
+                time.perf_counter() - started,
+                self.device,
+            )
             logger.debug(f"Resulting transcript text: {transcribed_text}")
             
             return transcribed_text

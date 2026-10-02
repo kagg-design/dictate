@@ -98,3 +98,10 @@ This happens if the application is not running with administrative rights.
 ### 3. Microphone Not Recording
 - Ensure the default microphone is set correctly in Windows Sound Settings.
 - Verify that "Allow desktop apps to access your microphone" is toggled **On** under **Windows Privacy Settings**.
+
+### 4. Long Text Appears in Bursts or Turns into Spaces
+- Dictate collects the complete transcript before inserting it. Delays after the first words appear belong to text input, rather than continued speech recognition.
+- Native Edit/RichEdit controls (including Notepad) receive the entire text through `EM_REPLACESEL`. Chromium controls receive literal `WM_CHAR` messages, avoiding the `VK_PACKET` path that can corrupt delayed Unicode input. Other controls use paced keyboard input. The system clipboard is never replaced.
+- Diagnostics are written automatically to `logs/app.log`; older parts are `app.log.1`, `app.log.2`, and `app.log.3`. These files include the recognized text.
+- `Transcription completed` reports recognition time and device. `Text delivered via` reports the control class, native input method, and delivery time. `Unicode keyboard events submitted` reports keyboard fallback submission time; it does not confirm that the receiving application displayed the text correctly.
+- To check text insertion independently of the microphone/GPU, run `.venv\Scripts\pythonw.exe scripts\check_text_input.py`, start its countdown, and focus an empty test editor. The diagnostic writes to `logs/text-input-check.log`.
