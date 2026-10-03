@@ -27,6 +27,7 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
+import ctranslate2
 from faster_whisper import WhisperModel
 from src.logger import logger
 
@@ -45,6 +46,13 @@ class WhisperTranscriber:
         if self.model is not None:
             logger.info("Whisper model is already loaded.")
             return
+
+        if self.device == "cuda" and ctranslate2.get_cuda_device_count() == 0:
+            logger.warning(
+                "NVIDIA GPU is unavailable. Falling back to CPU int8 for this session."
+            )
+            self.device = "cpu"
+            self.compute_type = "int8"
 
         logger.info(
             f"Loading faster-whisper model '{self.model_name}' on "

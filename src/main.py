@@ -409,10 +409,16 @@ def main():
         try:
             transcriber.load_model()
             model_loaded = True
+            if transcriber.device == "cpu":
+                try:
+                    tray_app.icon.title = "Dictate Tool (CPU fallback)"
+                except Exception as e:
+                    logger.warning(f"Failed to update tray tooltip for CPU fallback: {e}")
             logger.info("Application initialization complete.")
+            backend = "CUDA" if transcriber.device == "cuda" else "CPU (NVIDIA unavailable)"
             tray_app.show_notification(
                 "Dictate Ready", 
-                "Model loaded on CUDA. Hold Ctrl+Win to dictate."
+                f"Model loaded on {backend}. Hold Ctrl+Win to dictate."
             )
         except Exception as e:
             model_loading_error = True
