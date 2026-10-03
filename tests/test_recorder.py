@@ -90,6 +90,20 @@ class AudioRecorderTests(unittest.TestCase):
         self.assertFalse(recorder.is_recording)
         self.assertTrue(recorder.stream.active)
 
+    def test_diagnostics_measure_audio_callback_age_without_querying_driver(self):
+        recorder = self.make_recorder()
+        recorder.stream = Mock()
+        with patch("src.recorder.time.monotonic", return_value=100):
+            self.feed(recorder, 1)
+        with patch("src.recorder.time.monotonic", return_value=107):
+            state = recorder.diagnostic_state()
+
+        self.assertEqual(state["last_audio_callback_age_s"], 7)
+        self.assertTrue(state["audio_stream_present"])
+        self.assertFalse(state["recording"])
+        recorder.stream.assert_not_called()
+        self.assertEqual(recorder.stream.mock_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

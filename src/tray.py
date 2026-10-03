@@ -4,9 +4,14 @@ from PIL import Image, ImageDraw
 import pystray
 from src.logger import logger
 from src.inserter import paste_text
+from src.clipboard import copy_text
+from src.history import DictationHistory
+
+
+REFRESH_HISTORY_MENU = object()
 
 class SystemTrayApp:
-    def __init__(self, transcriber, recorder, hotkey_manager, on_exit_callback, show_startup_notifications=True):
+    def __init__(self, transcriber, recorder, hotkey_manager, on_exit_callback, show_startup_notifications=True, history=None):
         """
         Coordinates the system tray interface, state changes, and background tasks.
         :param transcriber: WhisperTranscriber instance.
@@ -20,6 +25,7 @@ class SystemTrayApp:
         self.hotkey_manager = hotkey_manager
         self.on_exit_callback = on_exit_callback
         self.show_startup_notifications = show_startup_notifications
+        self.history = history if history is not None else DictationHistory()
         
         self.state = 'idle'
         self.is_paused = False
@@ -37,6 +43,11 @@ class SystemTrayApp:
         # Define context menu options
         self.menu = pystray.Menu(
             pystray.MenuItem(
+                text="Dictation History",
+                action=pystray.Menu(self._history_menu_items),
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
                 text=lambda item: "Resume Dictation" if self.is_paused else "Pause Dictation",
                 action=self.toggle_pause
             ),
@@ -53,6 +64,35 @@ class SystemTrayApp:
             title="Dictate Tool",
             menu=self.menu
         )
+    def _history_menu_items(self):
+        entries = self.history.recent()
+        if not entries:
+            return (pystray.MenuItem("No saved dictations yet", None, enabled=False),)
+        return (
+            pystray.MenuItem("Select a phrase to copy", None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            *(pystray.MenuItem(entry.menu_label, self._copy_history_action(entry)) for entry in entries),
+        )
+
+    def _copy_history_action(self, entry):
+        # Bind the full entry, not its index: a new dictation must not change
+        # which text an already-open menu item copies.
+        def copy_selected(icon, item):
+            try:
+                copy_text(entry.text, getattr(self.icon, "_hwnd", None))
+                logger.info("Copied history entry to clipboard: %d characters", len(entry.text))
+                self.show_notification(
+                    "Dictation Copied",
+                    "Switch to the desired field and press Ctrl+V.",
+                )
+            except Exception:
+                logger.exception("Failed to copy dictation history entry")
+                self.show_notification(
+                    "Could Not Copy Dictation",
+                    "Try again. The text is still in history.",
+                )
+        return copy_selected
+
     def start(self, setup_callback=None):
         """
         Starts the worker thread, UI thread, and the pystray main loop.
@@ -176,7 +216,10 @@ class SystemTrayApp:
                     # Termination sentinel received
                     break
                 try:
-                    self.icon.icon = self._generate_icon_image(state)
+                    if state is REFRESH_HISTORY_MENU:
+                        self.icon.update_menu()
+                    else:
+                        self.icon.icon = self._generate_icon_image(state)
                 except Exception as e:
                     logger.debug(f"UI thread failed to update icon handle: {e}")
                 self.ui_queue.task_done()
@@ -202,6 +245,11 @@ class SystemTrayApp:
                     # Process transcription on GPU
                     text = self.transcriber.transcribe(audio_data)
                     if text:
+                        # Retain the complete transcript before attempting
+                        # delivery, even if a numeric field rejects it or
+                        # focus changes while Windows processes the input.
+                        self.history.add(text)
+                        self.ui_queue.put(REFRESH_HISTORY_MENU)
                         # Paste text in focused window
                         paste_text(text)
                     else:

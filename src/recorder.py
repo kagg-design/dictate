@@ -1,5 +1,6 @@
 import collections
 import threading
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -37,6 +38,7 @@ class AudioRecorder:
         self.ring_buffer_samples = int(sample_rate * ring_buffer_duration)
         self.ring_buffer = collections.deque()
         self.current_ring_samples = 0
+        self.last_callback_time = None
         self._lock = threading.RLock()
 
         self._start_background_stream()
@@ -69,6 +71,7 @@ class AudioRecorder:
         limit_callback = None
 
         with self._lock:
+            self.last_callback_time = time.monotonic()
             self.ring_buffer.append(block)
             self.current_ring_samples += len(block)
             while (
@@ -172,6 +175,23 @@ class AudioRecorder:
             return None
 
         return audio
+
+    def diagnostic_state(self):
+        """Report callback liveness without calling PortAudio during suspend."""
+        if not self._lock.acquire(timeout=0.05):
+            return {"audio_state": "lock_busy"}
+        try:
+            return {
+                "audio_stream_present": self.stream is not None,
+                "recording": self.is_recording,
+                "active_audio_s": round(self.active_samples / self.sample_rate, 2),
+                "last_audio_callback_age_s": (
+                    round(time.monotonic() - self.last_callback_time, 2)
+                    if self.last_callback_time is not None else None
+                ),
+            }
+        finally:
+            self._lock.release()
 
     def cleanup(self):
         """Close the warm input stream during application shutdown/recovery."""

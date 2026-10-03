@@ -122,7 +122,7 @@ class RecordingOverlay:
             except Exception:
                 pass
         except Exception as e:
-            logger.error(f"Error in overlay UI event loop: {e}")
+            logger.exception("Error in overlay UI event loop")
             
     def _animate_pulse(self):
         if self.window and self.window.winfo_exists():

@@ -1,11 +1,13 @@
 import sys
 import os
 
-# Redirect standard streams to null when running under pythonw to avoid crashes from warning prints
+# Enable crash reporting before Tk, PortAudio, CUDA or other native imports.
+from src.diagnostics import RuntimeDiagnostics
+diagnostics = RuntimeDiagnostics().install()
+
+# pythonw has no stdout. stderr is retained in logs/crash.log by diagnostics.
 if sys.stdout is None:
     sys.stdout = open(os.devnull, 'w')
-if sys.stderr is None:
-    sys.stderr = open(os.devnull, 'w')
 
 import threading
 from src.logger import logger
@@ -210,6 +212,7 @@ def main():
 
 
     if not check_single_instance():
+        diagnostics.mark_clean_shutdown("another instance already running")
         show_already_running_message()
         sys.exit(0)
 
@@ -348,6 +351,7 @@ def main():
         except Exception:
             pass
         logger.info("Application cleanup completed.")
+        diagnostics.mark_clean_shutdown("tray Exit requested and cleanup completed")
 
     # 6. Instantiate System Tray Application
     tray_app = SystemTrayApp(
@@ -357,6 +361,26 @@ def main():
         on_exit,
         show_startup_notifications=config.get("show_startup_notifications", True)
     )
+
+    def diagnostic_state():
+        # Read Python-owned state only; do not call Tk or the audio/GPU drivers
+        # from the diagnostic thread, especially while Windows is suspending.
+        state = recorder.diagnostic_state()
+        state.update({
+            "tray_state": tray_app.state,
+            "tray_running": tray_app.running,
+            "tray_visible": tray_app.icon.visible,
+            "paused": tray_app.is_paused,
+            "model_loaded": model_loaded,
+            "backend": transcriber.device,
+            "worker_alive": bool(tray_app.worker_thread and tray_app.worker_thread.is_alive()),
+            "tray_ui_alive": bool(tray_app.ui_thread and tray_app.ui_thread.is_alive()),
+            "overlay_alive": bool(overlay.thread and overlay.thread.is_alive()),
+            "queued_transcriptions": tray_app.task_queue.qsize(),
+        })
+        return state
+
+    diagnostics.start_monitoring(diagnostic_state)
 
     # 7. Define asynchronous setup task for loading the model and starting listeners
     def async_init(icon):
@@ -410,8 +434,12 @@ def main():
         logger.info("KeyboardInterrupt received. Shutting down.")
         tray_app.exit_app()
     except Exception as e:
-        logger.critical(f"Unhandled exception in main tray thread: {e}")
-        sys.exit(1)
+        logger.critical("Unhandled exception in main tray thread", exc_info=True)
+        raise
+    finally:
+        diagnostics.record_snapshot("Tray event loop returned")
+        if tray_app.running:
+            diagnostics.log.error("Tray event loop ended without an Exit request")
 
 if __name__ == "__main__":
     main()
