@@ -2,6 +2,9 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import wave
+
+import numpy as np
 
 from src.history import DictationHistory
 
@@ -68,6 +71,30 @@ class DictationHistoryTests(unittest.TestCase):
         history.add("")
         history.add(" \n")
         self.assertEqual(history.recent()[0].text, "saved")
+
+    def test_wav_attachment_survives_restart_and_expires_with_its_entry(self):
+        history = DictationHistory(self.path, max_entries=1)
+        entry = history.add("saved", model="Fluid Speech Mini")
+        pcm = np.array([[11], [-1024], [12]], dtype=np.int16)
+        history.save_audio(entry, pcm, 16000)
+
+        reopened = DictationHistory(self.path, max_entries=1)
+        saved, = reopened.recent()
+        self.assertEqual((saved.text, saved.model), ("saved", "Fluid Speech Mini"))
+        path = reopened.audio_path(saved)
+        with wave.open(str(path), "rb") as audio:
+            self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()), (1, 2, 16000))
+            self.assertEqual(audio.readframes(3), pcm.tobytes())
+        reopened.add("next")
+        self.assertFalse(path.exists())
+
+    def test_history_rejects_audio_paths_outside_the_audio_folder(self):
+        self.path.write_text(
+            '{"version":1,"entries":[{"created_at":"2026-10-03T10:00:00","text":"old",'
+            '"audio_file":"../unrelated.wav"}]}', encoding="utf-8",
+        )
+        history = DictationHistory(self.path)
+        self.assertIsNone(history.audio_path(history.recent()[0]))
 
 
 if __name__ == "__main__":

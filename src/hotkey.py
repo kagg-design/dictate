@@ -1,5 +1,6 @@
 import keyboard
 import threading
+from time import perf_counter
 
 from src.logger import logger
 
@@ -101,34 +102,27 @@ class HotkeyManager:
 
     def _on_ctrl_key_event(self, event):
         """Handle Ctrl asynchronously through the library's regular hook path."""
-        if self.paused:
-            return
-
         self._handle_modifier_event(event)
 
     def _on_win_key_event(self, event):
         """Observe every Win transition before selectively suppressing it."""
-        if self.paused:
-            return True
-
-        with self._state_lock:
-            was_active = self.is_active
-            self._handle_modifier_event(event)
-
-            # Suppress Win while entering, holding, or leaving the PTT chord.
-            # The callback still observes key-up, unlike keyboard.block_key().
-            return not (was_active or self.is_active)
+        return self._handle_modifier_event(event)
 
     def _handle_modifier_event(self, event):
         """Update physical modifier state and transition the PTT session."""
+        restore_windows_keys = False
         with self._state_lock:
+            if self.paused:
+                return True
+
+            was_active = self.is_active
             name = event.name
             if name in self.CTRL_NAMES:
                 self._update_pressed_keys(self._pressed_ctrl_keys, event)
             elif name in self.WIN_NAMES:
                 self._update_pressed_keys(self._pressed_win_keys, event)
             else:
-                return
+                return True
 
             chord_pressed = bool(self._pressed_ctrl_keys and self._pressed_win_keys)
             if chord_pressed and not self.is_active:
@@ -140,14 +134,23 @@ class HotkeyManager:
                 except Exception as e:
                     logger.error(f"Error executing on_trigger_start callback: {e}")
             elif not chord_pressed and self.is_active:
-                logger.info("Hotkey combination released: Ctrl or Win has been released.")
+                logger.info("Hotkey combination released: %s went up.", name)
                 self.is_active = False
                 try:
                     self.on_trigger_stop()
                 except Exception as e:
                     logger.error(f"Error executing on_trigger_stop callback: {e}")
                 finally:
-                    self._unblock_win_keys()
+                    restore_windows_keys = self._end_win_suppression()
+
+            # Suppress Win while entering, holding, or leaving the PTT chord.
+            accept = name not in self.WIN_NAMES or not (was_active or self.is_active)
+
+        # A physical Win key-up may already be waiting for the lock on the
+        # Windows hook thread. Let that callback return before injecting keys.
+        if restore_windows_keys:
+            self._restore_windows_key_state()
+        return accept
 
     @staticmethod
     def _update_pressed_keys(pressed_keys, event):
@@ -173,20 +176,24 @@ class HotkeyManager:
 
     def _unblock_win_keys(self):
         """Restore Windows keys and release their suppressed OS state."""
-        if not self.win_blocked:
-            return
+        with self._state_lock:
+            restore_windows_keys = self._end_win_suppression()
+        if restore_windows_keys:
+            self._restore_windows_key_state()
 
+    def _end_win_suppression(self):
+        was_blocked = self.win_blocked
+        self.win_blocked = False
+        return was_blocked
+
+    def _restore_windows_key_state(self):
         logger.info("Ending Windows-key event suppression.")
+        started = perf_counter()
         try:
-            self.win_blocked = False
-
-            # keyboard marks these generated events as replay events and does
-            # not deliver them to our hook. No manual ignore list is needed.
             keyboard.press("ctrl")
             keyboard.release("left windows")
             keyboard.release("right windows")
             keyboard.release("ctrl")
-            logger.debug("Sent Win key release events wrapped in Ctrl.")
+            logger.debug("Sent Win key release events wrapped in Ctrl in %.3fs.", perf_counter() - started)
         except Exception as e:
-            self.win_blocked = False
             logger.error(f"Failed to unblock Windows keys: {e}")

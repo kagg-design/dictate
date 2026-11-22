@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from src import inserter
+from src.cursor_context import CursorContext
 
 
 class FakeSendInput:
@@ -23,6 +24,9 @@ class TextInserterTests(unittest.TestCase):
         native_patcher = patch.object(inserter, "_try_insert_native_text", return_value=False)
         native_patcher.start()
         self.addCleanup(native_patcher.stop)
+        context_patcher = patch.object(inserter, "_read_insert_context", return_value=None)
+        self.read_context = context_patcher.start()
+        self.addCleanup(context_patcher.stop)
 
     def test_input_structure_matches_native_windows_size(self):
         expected_size = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
@@ -72,6 +76,22 @@ class TextInserterTests(unittest.TestCase):
             inserter.paste_text("Уже есть пробел ")
 
         send_unicode.assert_called_once_with("Уже есть пробел ")
+
+    def test_formats_text_after_releasing_modifiers_before_delivery(self):
+        with (
+            patch.object(inserter.sys, "platform", "win32"),
+            patch.object(inserter, "_wait_for_modifiers_released") as wait_for_release,
+            patch.object(inserter, "_send_unicode_text") as send_unicode,
+        ):
+            def read_context():
+                wait_for_release.assert_called_once_with()
+                return CursorContext("Это ", " пример.")
+
+            self.read_context.side_effect = read_context
+            inserter.paste_text("Хороший.")
+
+        inserter._try_insert_native_text.assert_called_once_with("хороший")
+        send_unicode.assert_called_once_with("хороший")
 
     def test_modifier_wait_requires_stable_released_state(self):
         fake_get_state = Mock()
@@ -260,11 +280,27 @@ class NativeTextInsertionTests(unittest.TestCase):
         with (
             patch.object(inserter.ctypes, "WinDLL", return_value=user32),
             patch.object(inserter, "_wait_for_modifiers_released"),
+            patch.object(inserter, "read_cursor_context", return_value=None),
             patch.object(inserter, "_send_unicode_text") as keyboard_input,
         ):
             with self.assertRaisesRegex(OSError, "failed or timed out"):
                 inserter.paste_text("Привет")
 
+        keyboard_input.assert_not_called()
+
+    def test_focus_change_during_context_lookup_stops_insertion(self):
+        with (
+            patch.object(inserter.ctypes, "WinDLL"),
+            patch.object(inserter, "_wait_for_modifiers_released"),
+            patch.object(inserter, "_focused_control", side_effect=[123, 456]),
+            patch.object(inserter, "read_cursor_context", return_value=CursorContext("", "")),
+            patch.object(inserter, "_try_insert_native_text") as native_input,
+            patch.object(inserter, "_send_unicode_text") as keyboard_input,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Focused control changed"):
+                inserter.paste_text("Привет")
+
+        native_input.assert_not_called()
         keyboard_input.assert_not_called()
 
 

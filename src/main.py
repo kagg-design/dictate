@@ -9,19 +9,21 @@ diagnostics = RuntimeDiagnostics().install()
 if sys.stdout is None:
     sys.stdout = open(os.devnull, 'w')
 
-import threading
 from src.logger import logger
 from src.config import load_config
 from src.recorder import AudioRecorder
 from src.transcriber import WhisperTranscriber
+from src.fluid_mini import FluidMiniTranscriber
 from src.hotkey import HotkeyManager
 from src.tray import SystemTrayApp
-from src.overlay import RecordingOverlay
+from src.desktop import DesktopApp
+from src.paths import IS_INSTALLED
 
 import ctypes
 
 # Keep mutex reference alive for the lifetime of the process
 _app_mutex = None
+_installed_app_mutex = None
 
 def check_single_instance():
     global _app_mutex
@@ -68,7 +70,7 @@ def create_start_menu_shortcut():
         shortcut_path = os.path.join(appdata, r"Microsoft\Windows\Start Menu\Programs\Dictate.lnk")
         project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         target_path = sys.executable
-        arguments = "-m src.main"
+        arguments = "-m src.main --show"
         icon_path = os.path.join(project_dir, "icon.ico")
         
         # We always verify/overwrite to keep paths fresh
@@ -197,96 +199,77 @@ def register_app_user_model_id_registry():
             logger.error(f"Failed to register AppUserModelID in registry: {e}")
 
 def main():
-    # Set explicit App User Model ID so Windows associates notifications with "DictateApp" instead of "Python"
+    global _installed_app_mutex
+    desktop = DesktopApp()
+    if not check_single_instance():
+        if not desktop.show_running_instance():
+            show_already_running_message()
+        desktop.close()
+        diagnostics.mark_clean_shutdown("opened running Dictate")
+        return
+
+    if IS_INSTALLED:
+        _installed_app_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, r"Local\KAGG.Dictate.Installed")
+
+    # Match the appropriate Start menu shortcut for Windows notifications.
     try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DictateApp")
+        app_id = "KAGG.Dictate" if IS_INSTALLED else "DictateApp"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     except Exception:
         pass
 
-    # Register in registry to ensure notification matching and custom icon display
-    register_app_user_model_id_registry()
+    if not IS_INSTALLED:
+        register_app_user_model_id_registry()
+        create_start_menu_shortcut()
 
-    # Ensure shortcut exists in the Start Menu so Windows can fetch the Dictate app icon
-    create_start_menu_shortcut()
-
-
-    if not check_single_instance():
-        diagnostics.mark_clean_shutdown("another instance already running")
-        show_already_running_message()
-        sys.exit(0)
 
     logger.info("Starting Dictate application...")
     
-    # 1. Load configuration
-    try:
-        config = load_config()
-    except Exception as e:
-        logger.error(f"Failed to load configuration: {e}. Using runtime defaults.")
-        config = {
-            "hotkey": "ctrl+win",
-            "model_name": "large-v3-turbo",
-            "device": "cuda",
-            "compute_type": "float16",
-            "max_duration": 600,
-            "sample_rate": 16000,
-            "min_duration": 0.3
-        }
+    config = load_config()
+    models = {
+        "whisper": (
+            f"Whisper ({config['model_name']})",
+            lambda: WhisperTranscriber(
+                model_name=config["model_name"],
+                device=config["device"],
+                compute_type=config["compute_type"],
+                vad_filter=config["vad_filter"],
+            ),
+        ),
+        "fluid-speech-mini": (
+            "Fluid Speech Mini",
+            lambda: FluidMiniTranscriber(
+                sample_rate=config["sample_rate"],
+                model_path=config.get("fluid_mini_model"),
+                dll_path=config.get("fluid_mini_dll"),
+            ),
+        ),
+    }
+    initial_model = config["recognition_model"]
+    if not isinstance(initial_model, str) or initial_model not in models:
+        logger.warning("Unknown speech model %r. Using Whisper.", initial_model)
+        initial_model = "whisper"
 
-    # 2. Instantiate core components
-    transcriber = WhisperTranscriber(
-        model_name=config.get("model_name", "large-v3-turbo"),
-        device=config.get("device", "cuda"),
-        compute_type=config.get("compute_type", "float16"),
-        vad_filter=config.get("vad_filter", True)
-    )
-    
     recorder = AudioRecorder(
         sample_rate=config.get("sample_rate", 16000),
         max_duration=config.get("max_duration", 600),
         min_duration=config.get("min_duration", 0.3),
         latency=config.get("latency", 0.08),
-        ring_buffer_duration=config.get("ring_buffer_duration", 0.5)
+        ring_buffer_duration=config.get("ring_buffer_duration", 0.5),
+        microphone=config["microphone"] if isinstance(config["microphone"], str) else None,
     )
-
-    overlay = RecordingOverlay(
-        show_overlay_indicator=config.get("show_overlay_indicator", True)
-    )
-    overlay.start()
-
-    # State flag to block recording until model is loaded
-    model_loaded = False
-    model_loading_error = False
 
     # 3. Define hotkey trigger callbacks
     def on_audio_start():
         logger.info("First audio block received. Activating recording indicators.")
         tray_app.set_state('recording')
-        overlay.show()
+        desktop.set_recording(True)
 
     def on_trigger_start():
-        nonlocal model_loaded, model_loading_error
-        if model_loading_error:
-            logger.warning("Hotkey pressed but Whisper model failed to load.")
-            tray_app.show_notification(
-                "Dictation Unavailable", 
-                "Model failed to load. Check logs for details."
-            )
-            return
-            
-        if not model_loaded:
-            logger.warning("Hotkey pressed but Whisper model is still loading.")
-            tray_app.show_notification(
-                "Please Wait", 
-                "Whisper model is still loading into GPU VRAM..."
-            )
-            return
-
         try:
-            # Start recording and define safety timeout and audio start callbacks
-            recorder.start(
+            tray_app.start_capture(
                 on_limit_reached=on_limit_reached,
-                on_audio_start=on_audio_start
+                on_audio_start=on_audio_start,
             )
         except Exception as e:
             logger.error(f"Failed to start recording: {e}")
@@ -297,40 +280,12 @@ def main():
             )
 
     def on_trigger_stop():
-        nonlocal model_loaded
-        if not model_loaded or not recorder.is_recording:
-            return
-
-        # Hide visual overlay
-        overlay.hide()
-
-        # Stop recording and fetch audio buffer
-        audio = recorder.stop()
-        if audio is not None:
-            # Queue the audio for background transcription thread
-            tray_app.queue_audio(audio)
-            tray_app.set_state('transcribing')
-        else:
-            # Audio was discarded (e.g. too short)
-            tray_app.set_state('idle')
+        tray_app.finish_capture()
+        desktop.set_recording(False)
 
     def on_limit_reached():
-        """
-        Triggered when recording reaches the 60-second safety limit.
-        """
         logger.info("Recording safety hard cap reached. Forcing stop.")
-        
-        # Hide visual overlay
-        overlay.hide()
-        
-        # Stop audio capture and queue transcription
-        audio = recorder.stop()
-        if audio is not None:
-            tray_app.queue_audio(audio)
-            tray_app.set_state('transcribing')
-        else:
-            tray_app.set_state('idle')
-            
+        on_trigger_stop()
         # Reset the hotkey state and unblock Win even though the user may still
         # be holding the chord when the safety limit fires.
         hotkey_manager.cancel_active()
@@ -347,7 +302,7 @@ def main():
         except Exception:
             pass
         try:
-            overlay.destroy()
+            desktop.close()
         except Exception:
             pass
         logger.info("Application cleanup completed.")
@@ -355,27 +310,37 @@ def main():
 
     # 6. Instantiate System Tray Application
     tray_app = SystemTrayApp(
-        transcriber, 
+        None,
         recorder, 
         hotkey_manager, 
         on_exit,
-        show_startup_notifications=config.get("show_startup_notifications", True)
+        show_startup_notifications=config.get("show_startup_notifications", True),
+        models=models,
+        open_window=desktop.show,
+        save_wav=config["save_wav"] is True,
+    )
+    desktop.start(
+        tray_app,
+        show_overlay=config.get("show_overlay_indicator", True),
+        appearance=config["appearance"],
     )
 
     def diagnostic_state():
         # Read Python-owned state only; do not call Tk or the audio/GPU drivers
         # from the diagnostic thread, especially while Windows is suspending.
         state = recorder.diagnostic_state()
+        engine = tray_app.transcriber
         state.update({
             "tray_state": tray_app.state,
             "tray_running": tray_app.running,
             "tray_visible": tray_app.icon.visible,
             "paused": tray_app.is_paused,
-            "model_loaded": model_loaded,
-            "backend": transcriber.device,
+            "model_loaded": engine is not None,
+            "recognition_model": tray_app.model_name,
+            "backend": engine.device if engine else None,
             "worker_alive": bool(tray_app.worker_thread and tray_app.worker_thread.is_alive()),
             "tray_ui_alive": bool(tray_app.ui_thread and tray_app.ui_thread.is_alive()),
-            "overlay_alive": bool(overlay.thread and overlay.thread.is_alive()),
+            "desktop_alive": bool(desktop.thread and desktop.thread.is_alive()),
             "queued_transcriptions": tray_app.task_queue.qsize(),
         })
         return state
@@ -384,8 +349,8 @@ def main():
 
     # 7. Define asynchronous setup task for loading the model and starting listeners
     def async_init(icon):
-        nonlocal model_loaded, model_loading_error
-        
+        if "--show" in sys.argv:
+            desktop.show()
         # Start global keyboard listener
         try:
             hotkey_manager.start_listening()
@@ -400,37 +365,7 @@ def main():
             tray_app.set_state('paused')
             return
 
-        # Load Whisper model into GPU
-        tray_app.show_notification(
-            "Dictate Tool", 
-            "Pre-loading Whisper model (large-v3-turbo) into GPU VRAM..."
-        )
-        
-        try:
-            transcriber.load_model()
-            model_loaded = True
-            if transcriber.device == "cpu":
-                try:
-                    tray_app.icon.title = "Dictate Tool (CPU fallback)"
-                except Exception as e:
-                    logger.warning(f"Failed to update tray tooltip for CPU fallback: {e}")
-            logger.info("Application initialization complete.")
-            backend = "CUDA" if transcriber.device == "cuda" else "CPU (NVIDIA unavailable)"
-            tray_app.show_notification(
-                "Dictate Ready", 
-                f"Model loaded on {backend}. Hold Ctrl+Win to dictate."
-            )
-        except Exception as e:
-            model_loading_error = True
-            logger.critical(f"Failed to initialize Whisper model: {e}")
-            tray_app.show_notification(
-                "CUDA Whisper Error", 
-                f"Failed to load Whisper model on GPU: {str(e)}"
-            )
-            # Pause dictation hotkeys
-            tray_app.is_paused = True
-            hotkey_manager.set_paused(True)
-            tray_app.set_state('paused')
+        tray_app.select_model(initial_model, persist=False)
 
     # 8. Start system tray (blocks main thread until exited)
     # The async_init runs on a background thread automatically once the tray is ready
@@ -444,6 +379,7 @@ def main():
         raise
     finally:
         diagnostics.record_snapshot("Tray event loop returned")
+        desktop.close()
         if tray_app.running:
             diagnostics.log.error("Tray event loop ended without an Exit request")
 

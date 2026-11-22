@@ -1,15 +1,11 @@
-import os
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
 
+from src.paths import LOG_DIR
+
 def setup_logger():
-    # Ensure logs directory exists
-    log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-        
-    log_file = os.path.join(log_dir, "app.log")
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     
     # Create the root logger for our app
     logger = logging.getLogger("dictate")
@@ -26,7 +22,7 @@ def setup_logger():
     
     # Rotating File Handler (1 MB limit, up to 3 backups)
     file_handler = RotatingFileHandler(
-        log_file,
+        LOG_DIR / "app.log",
         maxBytes=1 * 1024 * 1024,  # 1 MB
         backupCount=3,
         encoding='utf-8'

@@ -1,7 +1,7 @@
 """Keep complete transcripts recoverable independently of text insertion."""
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 import os
@@ -9,8 +9,11 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+from uuid import uuid4
+import wave
 
 from src.logger import logger
+from src.paths import LOG_DIR
 
 
 TRANSCRIPT_LINE = re.compile(
@@ -23,6 +26,8 @@ TRANSCRIPT_LINE = re.compile(
 class HistoryEntry:
     created_at: datetime
     text: str
+    model: str | None = None
+    audio_file: str | None = None
 
     @property
     def menu_label(self):
@@ -35,11 +40,13 @@ class HistoryEntry:
 
 
 class DictationHistory:
-    def __init__(self, path=None, max_entries=20):
+    def __init__(self, path=None, max_entries=100):
         if max_entries < 1:
             raise ValueError("max_entries must be positive")
-        self.path = Path(path or Path(__file__).resolve().parents[1] / "logs" / "dictation-history.json")
+        self.path = Path(path or LOG_DIR / "dictation-history.json")
+        self.audio_dir = self.path.parent / "dictation-audio"
         self._entries = deque(maxlen=max_entries)
+        self._persisted_audio = set()
         self._lock = threading.Lock()
         self._persist_enabled = True
         self._load()
@@ -54,8 +61,14 @@ class DictationHistory:
                 for item in data["entries"]:
                     if not isinstance(item["text"], str) or not item["text"].strip():
                         raise ValueError("Invalid transcript in dictation history")
-                    entries.append(HistoryEntry(datetime.fromisoformat(item["created_at"]), item["text"]))
+                    audio_file = item.get("audio_file")
+                    if not isinstance(audio_file, str) or not re.fullmatch(r"[0-9a-f]{32}\.wav", audio_file):
+                        audio_file = None
+                    entries.append(HistoryEntry(
+                        datetime.fromisoformat(item["created_at"]), item["text"], item.get("model"), audio_file
+                    ))
                 self._entries.extend(entries)
+                self._persisted_audio = {entry.audio_file for entry in entries if entry.audio_file}
                 return
             except (OSError, ValueError, TypeError, KeyError):
                 # Preserve a damaged/unreadable file for recovery. New text is
@@ -87,18 +100,55 @@ class DictationHistory:
         with self._lock:
             return tuple(reversed(self._entries))
 
-    def add(self, text):
+    def add(self, text, *, model=None):
         if not text or not text.strip():
             return None
-        entry = HistoryEntry(datetime.now().astimezone(), text)
+        entry = HistoryEntry(datetime.now().astimezone(), text, model)
         with self._lock:
             self._entries.append(entry)
             self._persist()
         return entry
 
+    def audio_path(self, entry):
+        if entry.audio_file:
+            path = self.audio_dir / entry.audio_file
+            if path.is_file():
+                return path
+        return None
+
+    def save_audio(self, entry, audio, sample_rate):
+        """Attach a WAV after text delivery has completed."""
+        if not self._persist_enabled or entry.audio_file:
+            return
+        name = uuid4().hex + ".wav"
+        try:
+            self.audio_dir.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(self.audio_dir / name), "wb") as output:
+                output.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
+                output.writeframes(audio.astype("<i2", copy=False).tobytes())
+        except (OSError, ValueError, wave.Error):
+            self._remove_audio(name)
+            logger.exception("Cannot save the dictation audio")
+            return
+
+        with self._lock:
+            if entry in self._entries:
+                position = self._entries.index(entry)
+                self._entries[position] = replace(entry, audio_file=name)
+                if self._persist():
+                    return
+                self._entries[position] = entry
+            self._remove_audio(name)
+
+    def _remove_audio(self, name):
+        try:
+            (self.audio_dir / name).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Cannot remove an unused dictation audio file")
+
     def _persist(self):
         if not self._persist_enabled:
-            return
+            return False
         temporary_path = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,15 +160,26 @@ class DictationHistory:
                 json.dump({
                     "version": 1,
                     "entries": [
-                        {"created_at": entry.created_at.isoformat(), "text": entry.text}
+                        {
+                            "created_at": entry.created_at.isoformat(),
+                            "text": entry.text,
+                            **({"model": entry.model} if entry.model else {}),
+                            **({"audio_file": entry.audio_file} if entry.audio_file else {}),
+                        }
                         for entry in self._entries
                     ],
                 }, stream, ensure_ascii=False, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_path, self.path)
+            active_audio = {entry.audio_file for entry in self._entries if entry.audio_file}
+            for name in self._persisted_audio - active_audio:
+                self._remove_audio(name)
+            self._persisted_audio = active_audio
+            return True
         except OSError:
             logger.exception("Cannot save dictation history; text remains available in this session")
+            return False
         finally:
             if temporary_path and temporary_path.exists():
                 try:

@@ -3,6 +3,7 @@ import sys
 import time
 from ctypes import wintypes
 
+from src.cursor_context import format_for_cursor, read_cursor_context
 from src.logger import logger
 
 
@@ -88,21 +89,16 @@ def paste_text(text):
         logger.info("No text to insert. Skipping text insertion.")
         return
 
-    # Leave the caret ready for a following dictation or typed word. Placing
-    # the separator after this insertion avoids a leading space if the user
-    # moves focus to a different field before the next dictation completes.
-    text_to_insert = text if text[-1].isspace() else text + " "
-    logger.info(
-        f"Inserting text directly: '{text_to_insert[:40]}...' "
-        f"(total length: {len(text_to_insert)})"
-    )
-
     if sys.platform != "win32":
         logger.error("Direct text insertion is only supported on Windows.")
         return
 
     try:
         _wait_for_modifiers_released()
+        text_to_insert = format_for_cursor(text, _read_insert_context())
+        if not text_to_insert:
+            return
+        logger.info("Inserting text directly (%d characters).", len(text_to_insert))
         if not _try_insert_native_text(text_to_insert):
             _send_unicode_text(text_to_insert)
     except Exception as e:
@@ -148,11 +144,29 @@ def _pressed_modifier_names(user32):
     )
 
 
+def _focused_control(user32):
+    user32.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO))
+    user32.GetGUIThreadInfo.restype = wintypes.BOOL
+    target = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    if user32.GetGUIThreadInfo(0, ctypes.byref(target)):
+        return target.hwndFocus
+    return None
+
+
+def _read_insert_context():
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    focus = _focused_control(user32)
+    if not focus:
+        return None
+    context = read_cursor_context()
+    if _focused_control(user32) != focus:
+        raise RuntimeError("Focused control changed while reading the cursor context.")
+    return context
+
+
 def _try_insert_native_text(text):
     """Use editor messages for native Edit/RichEdit and Chromium controls."""
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO))
-    user32.GetGUIThreadInfo.restype = wintypes.BOOL
     user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
     user32.GetClassNameW.restype = ctypes.c_int
     user32.SendMessageTimeoutW.argtypes = (
@@ -161,11 +175,11 @@ def _try_insert_native_text(text):
     )
     user32.SendMessageTimeoutW.restype = wintypes.LPARAM
 
-    target = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
-    if not user32.GetGUIThreadInfo(0, ctypes.byref(target)) or not target.hwndFocus:
+    focus = _focused_control(user32)
+    if not focus:
         return False
     class_name = ctypes.create_unicode_buffer(256)
-    if not user32.GetClassNameW(target.hwndFocus, class_name, len(class_name)):
+    if not user32.GetClassNameW(focus, class_name, len(class_name)):
         return False
 
     control_class = class_name.value.lower()
@@ -184,7 +198,7 @@ def _try_insert_native_text(text):
         # across processes; the clipboard and VK_PACKET state are not involved.
         replacement = ctypes.create_unicode_buffer(text)
         _send_text_message(
-            user32, target.hwndFocus, EM_REPLACESEL, 1, ctypes.addressof(replacement)
+            user32, focus, EM_REPLACESEL, 1, ctypes.addressof(replacement)
         )
         method = "EM_REPLACESEL"
     else:
@@ -193,23 +207,19 @@ def _try_insert_native_text(text):
         # mutable keyboard state while the editor processes a delayed queue.
         encoded = text.encode("utf-16-le", errors="surrogatepass")
         for offset in range(0, len(encoded), 2):
-            current = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
-            if (
-                not user32.GetGUIThreadInfo(0, ctypes.byref(current))
-                or current.hwndFocus != target.hwndFocus
-            ):
+            if _focused_control(user32) != focus:
                 raise RuntimeError(
                     "Focused control changed; stopped insertion after "
                     f"{offset // 2} UTF-16 code units."
                 )
             code_unit = int.from_bytes(encoded[offset:offset + 2], "little")
-            _send_text_message(user32, target.hwndFocus, WM_CHAR, code_unit, 1)
+            _send_text_message(user32, focus, WM_CHAR, code_unit, 1)
         method = "WM_CHAR"
 
     logger.info(
         "Text delivered via %s to '%s': %d characters in %.3fs (control=%s).",
         method, class_name.value, len(text), time.perf_counter() - started,
-        target.hwndFocus,
+        focus,
     )
     return True
 

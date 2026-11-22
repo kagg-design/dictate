@@ -1,37 +1,85 @@
 import os
+import re
 import sys
 import time
+from importlib import metadata
+
 import numpy as np
 
-# Attempt to resolve NVIDIA CUDA DLL paths for faster-whisper on Windows before imports
-if sys.platform == 'win32':
-    try:
-        import importlib.metadata
-        for pkg in ["nvidia-cublas-cu12", "nvidia-cudnn-cu12"]:
+from src.logger import logger
+from src.paths import APP_ROOT, IS_INSTALLED
+
+
+_CUDA_PACKAGES = ("nvidia-cublas-cu12", "nvidia-cudnn-cu12", "nvidia-cuda-nvrtc-cu12")
+_cuda_dll_directories = []
+_available_cuda_packages = set()
+
+# Register the private CUDA directories before importing CTranslate2.
+if sys.platform == "win32":
+    installed_packages = {
+        distribution.metadata["Name"]: distribution
+        for distribution in metadata.distributions(path=[str(APP_ROOT / "cuda")])
+    } if IS_INSTALLED else {}
+    for package in _CUDA_PACKAGES:
+        try:
+            distribution = installed_packages.get(package) if IS_INSTALLED else metadata.distribution(package)
+        except metadata.PackageNotFoundError:
+            continue
+        files = (distribution.files or ()) if distribution else ()
+        paths = {file.locate().parent for file in files if file.name.endswith(".dll") and file.locate().is_file()}
+        for path in sorted(paths):
             try:
-                files = importlib.metadata.files(pkg)
-                if files:
-                    dll_dirs = set()
-                    for f in files:
-                        if f.name.endswith(".dll"):
-                            dll_path = f.locate()
-                            dll_dirs.add(os.path.dirname(str(dll_path)))
-                    for d in dll_dirs:
-                        if os.path.exists(d):
-                            # Add to DLL directory search path
-                            os.add_dll_directory(d)
-                            # Also append to PATH just in case some C/C++ loaders require it
-                            os.environ['PATH'] = d + os.path.pathsep + os.environ['PATH']
-            except Exception:
-                pass
-    except Exception:
-        pass
+                _cuda_dll_directories.append(os.add_dll_directory(str(path)))
+            except OSError:
+                logger.warning("Could not register CUDA DLL directory %s", path)
+                continue
+            os.environ["PATH"] = str(path) + os.pathsep + os.environ.get("PATH", "")
+            _available_cuda_packages.add(package)
 
 import ctranslate2
 from faster_whisper import WhisperModel
-from src.logger import logger
+
+
+# Match stock Whisper endings only after recognition has joined all segments.
+_WHISPER_TAIL = re.compile(
+    r"""
+    (?:
+        (?<![\w«“"])
+        субтитры (?:\s+(?:создавал|создал|сделал|добавил|подготовил|подогнал)[аи]?)?
+        [\s:–—-]+ [«“"]? (?:дима[\s_.-]*тор[жз]ок|dima[\s_.-]*tor(?:zh|z|j)ok|симон) [»”"]?
+        |
+        (?:\A|(?<=[.!?…\r\n])\s*)
+        (?:
+            редактор\s+субтитров\s+[а-яё]\.\s*[а-яё-]+\s+корректор\s+[а-яё]\.\s*[а-яё-]+
+            | продолжение\s+следует
+            | спасибо\s+за\s+(?:просмотр|субтитры)
+            | (?:thank\s+you|thanks)\s+for\s+watching
+            | to\s+be\s+continued
+            | подпиш(?:ись|итесь)\s+на\s+канал
+        )
+        |
+        (?<![\w«“"]) (?P<thanks>спасибо|thank\ you) (?:[\s.,!?…;:]+(?P=thanks)){2,}
+    )
+    [.!?…]* \Z
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _strip_whisper_tail(text):
+    text = text.strip()
+    while artifact := _WHISPER_TAIL.search(text):
+        text = text[:artifact.start()].rstrip()
+    return text
+
 
 class WhisperTranscriber:
+    @staticmethod
+    def clean_text(text):
+        text = _strip_whisper_tail(text)
+        logger.debug("Resulting transcript text: %s", text)
+        return text
+
     def __init__(self, model_name="large-v3-turbo", device="cuda", compute_type="float16", vad_filter=True):
         self.model_name = model_name
         self.device = device
@@ -47,7 +95,12 @@ class WhisperTranscriber:
             logger.info("Whisper model is already loaded.")
             return
 
-        if self.device == "cuda" and ctranslate2.get_cuda_device_count() == 0:
+        if self.device == "auto":
+            use_cuda = _available_cuda_packages.issuperset(_CUDA_PACKAGES) and ctranslate2.get_cuda_device_count() > 0
+            self.device = "cuda" if use_cuda else "cpu"
+            self.compute_type = "float16" if use_cuda else "int8"
+
+        elif self.device == "cuda" and ctranslate2.get_cuda_device_count() == 0:
             logger.warning(
                 "NVIDIA GPU is unavailable. Falling back to CPU int8 for this session."
             )
@@ -70,6 +123,12 @@ class WhisperTranscriber:
             raise e
 
     def transcribe(self, audio_int16):
+        return self.clean_text(self.transcribe_chunk(audio_int16))
+
+    def close(self):
+        self.model = None
+
+    def transcribe_chunk(self, audio_int16):
         """
         Normalizes the audio buffer and transcribes it, auto-detecting the language.
         """
@@ -108,7 +167,6 @@ class WhisperTranscriber:
                 time.perf_counter() - started,
                 self.device,
             )
-            logger.debug(f"Resulting transcript text: {transcribed_text}")
             
             return transcribed_text
         except Exception as e:

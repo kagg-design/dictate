@@ -1,4 +1,5 @@
 import unittest
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -51,6 +52,32 @@ class HotkeyManagerTests(unittest.TestCase):
         self.dispatch(key_event("left ctrl", "up", 29))
 
         self.on_start.assert_called_once_with()
+        self.on_stop.assert_called_once_with()
+
+    def test_ctrl_release_allows_win_hook_to_finish_before_synthetic_release(self):
+        self.dispatch(key_event("left ctrl", "down", 29))
+        self.dispatch(key_event("left windows", "down", 91))
+        finished = Event()
+        hook_progress = []
+
+        def win_key_up():
+            self.dispatch(key_event("left windows", "up", 91))
+            finished.set()
+
+        win_hook = Thread(target=win_key_up, daemon=True)
+
+        def inject_ctrl_down(_):
+            # Windows may wait for the pending physical hook to return
+            # before the injected key press can complete.
+            win_hook.start()
+            hook_progress.append(finished.wait(timeout=1))
+
+        self.keyboard.press.side_effect = inject_ctrl_down
+        self.dispatch(key_event("left ctrl", "up", 29))
+        win_hook.join(timeout=1)
+
+        self.assertEqual(hook_progress, [True])
+        self.assertFalse(self.manager._pressed_win_keys)
         self.on_stop.assert_called_once_with()
 
     def test_releasing_one_of_two_ctrl_keys_keeps_chord_active(self):

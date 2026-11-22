@@ -16,6 +16,8 @@ import threading
 import time
 import traceback
 
+from src.paths import LOG_DIR
+
 
 POWER_EVENTS = {
     0x0004: "PBT_APMSUSPEND",
@@ -27,7 +29,7 @@ DEVICE_NOTIFY_CALLBACK = 2
 
 class RuntimeDiagnostics:
     def __init__(self, log_dir=None, heartbeat_seconds=60):
-        self.log_dir = Path(log_dir or Path(__file__).resolve().parents[1] / "logs")
+        self.log_dir = Path(log_dir or LOG_DIR)
         self.heartbeat_seconds = heartbeat_seconds
         self.state_provider = None
         self._events = queue.Queue()

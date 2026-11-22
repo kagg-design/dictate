@@ -1,13 +1,22 @@
 import os
+import threading
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 import yaml
 from src.logger import logger
+from src.paths import DATA_DIR, IS_INSTALLED
 
-DEFAULT_CONFIG_PATH = "config.yaml"
+DEFAULT_CONFIG_PATH = DATA_DIR / "config.yaml"
+_config_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "hotkey": "ctrl+win",
+    "recognition_model": "whisper",
+    "microphone": None,
+    "save_wav": False,
+    "appearance": "System",
     "model_name": "large-v3-turbo",
-    "device": "cuda",
+    "device": "auto" if IS_INSTALLED else "cuda",
     "compute_type": "float16",
     "max_duration": 600,      # 600 seconds hard cap
     "sample_rate": 16000,    # 16 kHz mono
@@ -26,6 +35,7 @@ def load_config(config_path=DEFAULT_CONFIG_PATH):
     if not os.path.exists(config_path):
         logger.info(f"Configuration file {config_path} not found. Creating with defaults.")
         try:
+            Path(config_path).parent.mkdir(parents=True, exist_ok=True)
             with open(config_path, 'w', encoding='utf-8') as f:
                 yaml.safe_dump(DEFAULT_CONFIG, f, default_flow_style=False)
             logger.info(f"Successfully wrote default configuration to {config_path}")
@@ -50,3 +60,34 @@ def load_config(config_path=DEFAULT_CONFIG_PATH):
     except Exception as e:
         logger.error(f"Failed to read configuration from {config_path}: {e}. Using default configuration.")
         return DEFAULT_CONFIG.copy()
+
+
+def save_recognition_model(model, config_path=DEFAULT_CONFIG_PATH):
+    save_settings({"recognition_model": model}, config_path)
+
+
+def save_settings(changes, config_path=DEFAULT_CONFIG_PATH):
+    """Update selected values without losing concurrent settings changes."""
+    with _config_lock:
+        _save_settings(changes, config_path)
+
+
+def _save_settings(changes, config_path):
+    path = Path(config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    current = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if current is None:
+        current = {}
+    if not isinstance(current, dict):
+        raise ValueError(f"Cannot update an invalid configuration: {path}")
+    current.update(changes)
+
+    temp_path = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as temp:
+            temp_path = Path(temp.name)
+            yaml.safe_dump(current, temp, sort_keys=False)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)

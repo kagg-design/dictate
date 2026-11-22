@@ -1,0 +1,8 @@
+faster-whisper==1.2.1
+comtypes==1.4.16; sys_platform == "win32"
+sounddevice==0.4.7
+keyboard==0.13.5
+pystray==0.19.5
+pillow==10.4.0
+pyyaml==6.0.1
+numpy<2.0.0

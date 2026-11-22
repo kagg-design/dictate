@@ -1,20 +1,39 @@
 import queue
 import threading
+from dataclasses import dataclass
 from PIL import Image, ImageDraw
 import pystray
 from src.logger import logger
 from src.inserter import paste_text
 from src.clipboard import copy_text
 from src.history import DictationHistory
+from src.config import save_recognition_model, save_settings
+from src.live_transcription import CompletedCapture, LiveTranscription
 
 
 REFRESH_HISTORY_MENU = object()
 
+
+@dataclass(frozen=True)
+class ModelSelection:
+    model: str
+    persist: bool
+
+
+@dataclass(frozen=True)
+class MicrophoneSelection:
+    microphone: str | None
+
+
 class SystemTrayApp:
-    def __init__(self, transcriber, recorder, hotkey_manager, on_exit_callback, show_startup_notifications=True, history=None):
+    def __init__(
+        self, transcriber, recorder, hotkey_manager, on_exit_callback,
+        show_startup_notifications=True, history=None, models=None,
+        open_window=None, save_wav=False,
+    ):
         """
         Coordinates the system tray interface, state changes, and background tasks.
-        :param transcriber: WhisperTranscriber instance.
+        :param transcriber: Active speech engine, if already loaded.
         :param recorder: AudioRecorder instance.
         :param hotkey_manager: HotkeyManager instance.
         :param on_exit_callback: Cleanup function on app shutdown.
@@ -26,6 +45,15 @@ class SystemTrayApp:
         self.on_exit_callback = on_exit_callback
         self.show_startup_notifications = show_startup_notifications
         self.history = history if history is not None else DictationHistory()
+        self.models = models or {}
+        self.model_name = None
+        self._capture_lock = threading.Lock()
+        self._capture = None
+        self._pending_captures = 0
+        self._loading_model = False
+        self._changing_microphone = False
+        self.settings_error = ""
+        self.save_wav = save_wav
         
         self.state = 'idle'
         self.is_paused = False
@@ -40,12 +68,13 @@ class SystemTrayApp:
         
         self.running = True
         
-        # Define context menu options
+        if open_window is None:
+            first_item = pystray.MenuItem("Dictation History", pystray.Menu(self._history_menu_items))
+        else:
+            first_item = pystray.MenuItem("Open Dictate", open_window, default=True)
+
         self.menu = pystray.Menu(
-            pystray.MenuItem(
-                text="Dictation History",
-                action=pystray.Menu(self._history_menu_items),
-            ),
+            first_item,
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 text=lambda item: "Resume Dictation" if self.is_paused else "Pause Dictation",
@@ -64,6 +93,146 @@ class SystemTrayApp:
             title="Dictate Tool",
             menu=self.menu
         )
+
+    @property
+    def settings_busy(self):
+        return bool(self._loading_model or self._changing_microphone or self.dictation_busy)
+
+    @property
+    def dictation_busy(self):
+        return bool(self._capture or self._pending_captures)
+
+    @property
+    def settings_activity(self):
+        if self._loading_model:
+            return "Loading speech model…"
+        if self._changing_microphone:
+            return "Switching microphone…"
+        return ""
+
+    def select_model(self, model, *, persist=True):
+        with self._capture_lock:
+            if not self.running or model not in self.models or model == self.model_name or self.settings_busy:
+                return
+            self.settings_error = ""
+            self._loading_model = True
+            self.task_queue.put(ModelSelection(model, persist))
+
+    def _load_model(self, selection):
+        label, create = self.models[selection.model]
+        engine = None
+        self.show_notification("Loading Speech Model", label)
+        try:
+            engine = create()
+            engine.load_model()
+            if selection.persist:
+                save_recognition_model(selection.model)
+        except Exception as exc:
+            if engine is not None:
+                self._close_engine(engine)
+            self.settings_error = f"Could not load {label}. {exc}"
+            logger.exception("Failed to switch to %s", label)
+            self.show_notification("Could Not Load Speech Model", str(exc))
+        else:
+            previous, self.transcriber = self.transcriber, engine
+            self.model_name = selection.model
+            if previous is not None:
+                self._close_engine(previous)
+            self.icon.title = f"Dictate · {label} ({engine.device.upper()})"
+            logger.info("Speech model ready: %s (%s)", label, engine.device)
+            self.show_notification("Dictate Ready", f"{label} on {engine.device.upper()}. Hold Ctrl+Win to dictate.")
+        finally:
+            with self._capture_lock:
+                self._loading_model = False
+            self.ui_queue.put(REFRESH_HISTORY_MENU)
+
+    def select_microphone(self, microphone):
+        with self._capture_lock:
+            if not self.running or self.settings_busy:
+                return
+            if microphone == self.recorder.microphone and self.recorder.stream:
+                return
+            self.settings_error = ""
+            self._changing_microphone = True
+            self.task_queue.put(MicrophoneSelection(microphone))
+
+    def _change_microphone(self, selection):
+        try:
+            self.recorder.select_microphone(
+                selection.microphone,
+                persist=lambda: save_settings({"microphone": selection.microphone}),
+            )
+        except Exception as exc:
+            self.settings_error = f"Could not switch microphones. {exc}"
+            logger.exception("Failed to switch the input device")
+        finally:
+            with self._capture_lock:
+                self._changing_microphone = False
+
+    def set_save_wav(self, enabled):
+        try:
+            save_settings({"save_wav": enabled})
+        except Exception as exc:
+            self.settings_error = f"Could not save the history preference. {exc}"
+            logger.exception("Failed to save the WAV preference")
+        else:
+            self.save_wav = enabled
+            self.settings_error = ""
+
+    @staticmethod
+    def _close_engine(engine):
+        try:
+            engine.close()
+        except Exception:
+            logger.exception("Failed to release the previous speech engine")
+
+    def start_capture(self, on_limit_reached, on_audio_start):
+        with self._capture_lock:
+            if not self.running or self._capture:
+                return
+            if self._loading_model or self._changing_microphone or self.transcriber is None:
+                message = (
+                    self.settings_activity or "Select a speech model in Dictate Settings."
+                )
+                self.show_notification("Dictation Unavailable", message)
+                return
+
+            capture = LiveTranscription(
+                self.recorder.sample_rate, rolling=self.model_name == "fluid-speech-mini"
+            )
+
+            def show_recording():
+                with self._capture_lock:
+                    if self._capture is capture:
+                        on_audio_start()
+
+            self.recorder.start(on_limit_reached=on_limit_reached, on_audio_start=show_recording)
+            self._capture = capture
+
+    def finish_capture(self):
+        with self._capture_lock:
+            if self._capture is None:
+                return
+            capture, self._capture = self._capture, None
+            audio = self.recorder.stop()
+            if self.recorder.capture_interrupted is True:
+                self.show_notification("Microphone Interrupted", "Part of this dictation may be missing.")
+            if audio is None:
+                self._restore_tray_state()
+                return
+            self._pending_captures += 1
+            self.set_state("transcribing")
+            self.task_queue.put(CompletedCapture(capture, audio, self.save_wav))
+
+    def _process_live_audio(self):
+        with self._capture_lock:
+            capture = self._capture
+            if capture is None:
+                return
+            blocks = self.recorder.recorded_blocks_from(capture.blocks_seen)
+        self.recorder.check_capture_input()
+        capture.feed(blocks, self.transcriber)
+
     def _history_menu_items(self):
         entries = self.history.recent()
         if not entries:
@@ -79,7 +248,7 @@ class SystemTrayApp:
         # which text an already-open menu item copies.
         def copy_selected(icon, item):
             try:
-                copy_text(entry.text, getattr(self.icon, "_hwnd", None))
+                self.copy_history_entry(entry)
                 logger.info("Copied history entry to clipboard: %d characters", len(entry.text))
                 self.show_notification(
                     "Dictation Copied",
@@ -92,6 +261,9 @@ class SystemTrayApp:
                     "Try again. The text is still in history.",
                 )
         return copy_selected
+
+    def copy_history_entry(self, entry):
+        copy_text(entry.text, getattr(self.icon, "_hwnd", None))
 
     def start(self, setup_callback=None):
         """
@@ -156,13 +328,6 @@ class SystemTrayApp:
             except Exception as e:
                 logger.debug(f"Non-critical: Failed to update tray menu manually: {e}")
 
-    def queue_audio(self, audio_data):
-        """
-        Pushes a recorded numpy audio buffer into the processing queue.
-        """
-        if audio_data is not None:
-            self.task_queue.put(audio_data)
-
     def show_notification(self, title, message):
         """
         Sends a balloon/toast notification to the Windows system tray.
@@ -186,7 +351,9 @@ class SystemTrayApp:
         self.hotkey_manager.stop_listening()
         
         # Stop recording stream if active
-        self.recorder.stop()
+        with self._capture_lock:
+            self._capture = None
+            self.recorder.stop()
         
         # Stop the tray icon loop
         if self.icon:
@@ -229,49 +396,60 @@ class SystemTrayApp:
                 logger.error(f"Error in UI update loop: {e}")
 
     def _worker_loop(self):
-        """
-        Background worker thread processing transcription tasks sequentially.
-        """
-        while self.running:
-            try:
-                # Retrieve recorded buffer (blocks up to 1 second)
-                audio_data = self.task_queue.get(timeout=1.0)
-                if audio_data is None:
-                    # Termination sentinel received
-                    break
-                    
-                self.set_state('transcribing')
+        """Serialize speech inference, model changes and the final insertion."""
+        try:
+            while self.running:
                 try:
-                    # Process transcription on GPU
-                    text = self.transcriber.transcribe(audio_data)
-                    if text:
-                        # Retain the complete transcript before attempting
-                        # delivery, even if a numeric field rejects it or
-                        # focus changes while Windows processes the input.
-                        self.history.add(text)
-                        self.ui_queue.put(REFRESH_HISTORY_MENU)
-                        # Paste text in focused window
-                        paste_text(text)
+                    task = self.task_queue.get(timeout=0.15)
+                except queue.Empty:
+                    self._process_live_audio()
+                    continue
+                try:
+                    if task is None:
+                        break
+                    if isinstance(task, ModelSelection):
+                        self._load_model(task)
+                    elif isinstance(task, MicrophoneSelection):
+                        self._change_microphone(task)
                     else:
-                        logger.info("Transcription yielded empty result. Skipping insertion.")
-                except Exception as e:
-                    logger.error(f"Error inside transcription worker loop: {e}")
-                    self.show_notification(
-                        "Transcription Error", 
-                        f"An error occurred: {str(e)}"
-                    )
+                        self._deliver_transcript(task)
                 finally:
-                    # Revert to standard state after execution
-                    if self.is_paused:
-                        self.set_state('paused')
-                    else:
-                        self.set_state('idle')
-                        
-                self.task_queue.task_done()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"Unhandled exception in background worker loop: {e}")
+                    self.task_queue.task_done()
+        finally:
+            if self.transcriber is not None:
+                self._close_engine(self.transcriber)
+
+    def _deliver_transcript(self, task):
+        entry = None
+        try:
+            if isinstance(task, CompletedCapture):
+                text = task.live.finish(task.audio, self.transcriber)
+            else:
+                text = self.transcriber.transcribe(task)
+            if text and self.running:
+                # Save first, so the user can recover the text if delivery fails.
+                model = self.models[self.model_name][0] if self.model_name in self.models else None
+                entry = self.history.add(text, model=model)
+                self.ui_queue.put(REFRESH_HISTORY_MENU)
+                paste_text(text)
+            else:
+                logger.info("Transcription yielded no text to insert.")
+        except Exception as exc:
+            logger.exception("Could not finish dictation")
+            self.show_notification("Transcription Error", str(exc))
+        finally:
+            with self._capture_lock:
+                if isinstance(task, CompletedCapture):
+                    self._pending_captures -= 1
+                self._restore_tray_state()
+            if entry and isinstance(task, CompletedCapture) and task.save_wav:
+                self.history.save_audio(entry, task.audio, self.recorder.sample_rate)
+
+    def _restore_tray_state(self):
+        if self.is_paused:
+            self.set_state("paused")
+        elif self._capture is None:
+            self.set_state("transcribing" if self._pending_captures else "idle")
 
     def _generate_icon_image(self, state):
         """

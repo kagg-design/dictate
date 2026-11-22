@@ -27,3 +27,7 @@ stdout.txt
 stderr.txt
 crash_log.txt
 
+# Windows distribution build products
+artifacts/windows/
+artifacts/windows-build/
+

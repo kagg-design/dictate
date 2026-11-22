@@ -1,6 +1,18 @@
 # Dictate: Local Push-to-Talk Dictation for Windows
 
-A lightweight system tray application that transcribes your voice locally using `faster-whisper` and pastes the text directly into the currently focused window (any application) upon releasing a global hotkey.
+A Windows dictation app that runs Fluid Speech Mini or Whisper locally and inserts the final text into the focused window when you release the hotkey.
+
+## Install on Windows
+
+1. Open [GitHub Releases](https://github.com/kagg-design/dictate/releases) and download `Dictate-Setup-x64.exe` from the release's **Assets**. The installer is for Windows 10 and 11 on x64 PCs and includes its own Python and Inter font.
+2. Run Setup. If you have an NVIDIA GPU, keep **Download NVIDIA libraries for GPU acceleration** selected. This downloads about 1.3 GB and uses your existing NVIDIA driver. Setup warns when it expects to run without GPU acceleration and lets you continue in the slower CPU mode or cancel. Dictate shows **CPU mode** whenever Whisper is using the processor.
+3. Open **Dictate** from the Start menu. Give it time to download the Whisper model on first launch. After the model is ready, hold `Ctrl+Win` while you speak and release it to insert the text.
+
+Whisper runs on your computer once the model has downloaded. To use Fluid Speech Mini, install FluidVoice for Windows, download and activate Mini there, then select it in Dictate's **Settings**.
+
+The installer is unsigned. Compare the file with the SHA-256 checksum attached to the same release if Windows shows an unknown publisher. If Dictate reports a missing `MSVCP140.dll` or `VCRUNTIME140.dll`, install Microsoft's [Visual C++ Redistributable for x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).
+
+Close Dictate from its tray menu before updating or uninstalling. Remove it under **Settings → Apps → Installed apps**. Dictate keeps configuration, history, and saved WAVs under `%LOCALAPPDATA%\Dictate` across upgrades and uninstall.
 
 ## Features
 
@@ -8,26 +20,27 @@ A lightweight system tray application that transcribes your voice locally using 
 - **Ultra-Fast Local Transcription:** Transcribes audio on-device using the GPU-accelerated `faster-whisper` model (`large-v3-turbo`).
 - **Mixed-Language Support:** Automatically detects the spoken language (perfect for switching between English and Russian in a single phrase).
 - **Direct Insertion:** Types transcribed text into the active Windows application using Unicode input events.
-- **Clipboard Safe:** Automatic dictation never replaces the system clipboard. Selecting a saved phrase from the history menu explicitly copies it for `Ctrl+V`.
-- **Dictation History:** Recover the last 20 complete transcripts from the tray menu, including text rejected by the destination field. History survives application restarts.
-- **System Tray Control:** A simple icon showing the current state (Idle, Recording, Transcribing, Paused) with options to Pause/Resume and Exit.
+- **Cursor Context:** When an editable field exposes its caret or selection to Windows UI Automation, Dictate adjusts the first letter, final period, and spaces to fit the surrounding text. Recognized search and address fields keep the dictated capitalization and omit a final period. The previous insertion behavior applies when context is unavailable.
+- **Clipboard Safe:** Automatic dictation leaves the clipboard alone. Use **Copy text** in History to copy a saved transcript.
+- **Dictation History:** Search and recover the latest 100 complete transcripts, including text rejected by the destination field. Optional WAV audio plays from the History window.
+- **System Tray Control:** Click the icon to open Dictate. The right-click menu offers Pause/Resume and Exit.
 - **Safety Hard Caps:** Restricts recording to 60 seconds maximum and discards recordings under 300 ms to avoid accidental keypresses.
 
 ---
 
-## Requirements
+## Running from source
 
 1. **Operating System:** Windows 10 or 11.
 2. **GPU:** NVIDIA GPU with at least 6 GB VRAM (for running `large-v3-turbo` in float16) and up-to-date NVIDIA drivers.
 3. **Python:** Python 3.12 installed and added to your PATH.
-4. **Permissions:** Must be run as **Administrator** so the global keyboard listener can hook keys and suppress the Windows Start Menu from popping up when releasing the hotkey.
+4. **Permissions:** Use a standard account for ordinary desktop apps. If Windows blocks dictation into a target app running as administrator, launch Dictate at the same elevation as the target.
 
 ---
 
-## Installation
+### Source installation
 
 1. **Clone or download** this repository to your target folder.
-2. **Open Command Prompt (or PowerShell) as Administrator** in the project directory.
+2. **Open Command Prompt or PowerShell** in the project directory.
 3. **Create a virtual environment:**
    ```cmd
    python -m venv .venv
@@ -43,10 +56,10 @@ A lightweight system tray application that transcribes your voice locally using 
 
 ---
 
-## Running the Application
+### Starting from the checkout
 
 ### Option A: Via Command Line (for output/debugging)
-From an elevated command line:
+From the project directory:
 ```cmd
 .venv\Scripts\python.exe -m src.main
 ```
@@ -56,7 +69,17 @@ Double-click the `run.bat` script, or run:
 ```cmd
 .venv\Scripts\pythonw.exe -m src.main
 ```
-This runs the application without a Command Prompt window. The system tray icon is your interface.
+This starts Dictate in the system tray. Click its icon or choose **Dictate** in the Start menu to open the History and Settings window.
+
+### Building a Windows release
+
+Build on an x64 Windows PC with Python 3.12 (including Tk) and [Inno Setup 6](https://jrsoftware.org/isdl.php). From the repository root, run this in PowerShell. Substitute the path to `ISCC.exe` if necessary.
+
+```powershell
+py -3.12 scripts/build_windows.py --compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' --version 0.1.0
+```
+
+The build checks the packaged Python runtime and produces `Dictate-Setup-x64.exe` and `Dictate-Setup-x64.exe.sha256` in `artifacts/windows/`. Attach both files to a GitHub Release for the matching tag. The binary is a Release asset and stays out of the source tree.
 
 ---
 
@@ -70,6 +93,14 @@ This script will locate the NVIDIA runtimes, load the Whisper model into your GP
 
 ---
 
+## Settings
+
+Open **Settings** to choose a microphone and select Whisper or Fluid Speech Mini. The input meter shows whether the selected microphone is receiving sound. Dictate saves the selection after opening the microphone or loading the model.
+
+Fluid Speech Mini uses the model and CUDA runtime already installed by FluidVoice. Install FluidVoice for Windows and enable Mini there once to make those files available. For a separate installation of the same runtime and model, set `fluid_mini_dll` and `fluid_mini_model` in `config.yaml`.
+
+Dictate uses the microphone's pre-roll at the start of each recording. During recording, Fluid Speech Mini processes overlapping audio windows, including continuous speech. Whisper processes completed phrases at pauses. Dictate assembles the final dictation and inserts it once when you release the hotkey.
+
 ## Adding to Windows Startup
 
 To launch this application automatically when Windows starts:
@@ -77,7 +108,6 @@ To launch this application automatically when Windows starts:
 2. Rename the new shortcut to `Dictate`.
 3. Press `Win + R`, type `shell:startup`, and press Enter. This opens the Windows Startup folder.
 4. Drag and drop the `Dictate` shortcut into the Startup folder.
-5. *Note: Since the script needs administrative rights to block the Windows key, you may need to set the shortcut properties to "Run as Administrator", or configure it via the Windows Task Scheduler to run with highest privileges.*
 
 ---
 
@@ -93,8 +123,7 @@ This happens when CTranslate2/faster-whisper cannot locate the NVIDIA DLLs.
 - Alternatively, you can download the cuBLAS and cuDNN DLLs from NVIDIA and place them directly in your Python folder or add them to your Windows System `PATH`.
 
 ### 2. Windows Start Menu Pops Up when Dictating
-This happens if the application is not running with administrative rights.
-- **Fix:** Close the application via the tray icon, reopen your terminal **as Administrator**, and run it again. Global key hooking and event suppression require elevated permissions on Windows.
+- Close applications that also listen for the same hotkey. If the target application was started as administrator, restart Dictate at the same elevation and try again.
 
 ### 3. Microphone Not Recording
 - Ensure the default microphone is set correctly in Windows Sound Settings.
@@ -103,7 +132,7 @@ This happens if the application is not running with administrative rights.
 ### 4. Dictation Stops After the NVIDIA GPU Disappears
 - Check `logs/app.log` for `no CUDA-capable device is detected`. Windows may show the NVIDIA GPU as absent while the integrated GPU remains available.
 - On a ProArt laptop, open **ProArt Creator Hub > Dashboard > GPU Mode** and select **Standard** if **Eco Mode** is active. Then restart Dictate to use CUDA again.
-- While NVIDIA is unavailable, Dictate automatically loads the model on CPU with `int8` compute. The tray tooltip says `CPU fallback`; transcription may be slower. Notification permissions do not control recording or model loading.
+- Whisper can fall back to CPU with `int8` compute. The tray tooltip indicates the active model and device. Fluid Speech Mini uses the CUDA runtime.
 
 ### 5. Long Text Appears in Bursts or Turns into Spaces
 - Dictate collects the complete transcript before inserting it. Delays after the first words appear belong to text input, rather than continued speech recognition.
@@ -119,6 +148,6 @@ This happens if the application is not running with administrative rights.
 - If the icon disappears, preserve these journals before restarting. Compare them with Windows **System** events from **Kernel-Power** (506/507 on Modern Standby), and **Application** errors. A short successful test does not rule out a failure during an entire night; repeat the usual lid-close scenario afterwards.
 
 ### 7. Recover Dictation Rejected by a Field
-- Right-click the Dictate tray icon, open **Dictation History**, and select a phrase by its time and preview. The complete text is copied, including any portion omitted from the menu preview. Focus the intended text field and press `Ctrl+V`.
-- The last 20 non-empty transcripts are saved to `logs/dictation-history.json` before insertion. Storage is replaced atomically and retained across restarts; saving/automatic insertion does not copy anything to the clipboard. Only explicitly selecting a history item changes it.
-- On first use, available recent transcripts are recovered from `logs/app.log` and its backups. History stores text, not audio; phrases lost during recognition itself cannot be reconstructed from it.
+- Click the Dictate tray icon and open **History**. Search or select a row to read a full transcript, then use **Copy text** to copy it.
+- The latest 100 non-empty transcripts are saved locally to `logs/dictation-history.json` before insertion. On first use, available transcripts can be recovered from the application logs.
+- To retain audio for future dictations, turn on **Save WAV audio locally** in Settings. WAV files are saved after text insertion and are playable from History. They stay with their transcripts until the entry ages out.
