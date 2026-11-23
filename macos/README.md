@@ -10,6 +10,12 @@ In Dictate settings, allow **Microphone**, **Input Monitoring**, and **Accessibi
 
 The beta uses the current macOS default microphone and decodes completed phrases as you speak. A long uninterrupted phrase is finalized on release.
 
+In **Settings**, choose the shortcut and enable **Press to start / stop** for hands-free dictation. With **Esc cancels and keeps text in History** enabled, Escape ends the recording and saves any recognized text without inserting it. **Copy Last Dictation** is available in the menu bar and with **Control + Command + V**.
+
+**Show live transcript while dictating** is off by default. Enable **Start Dictate at login** to use the macOS login item. If macOS asks for approval, enable Dictate under **System Settings → General → Login Items**.
+
+Select a word or phrase in **History** and choose **Add replacement…** to fix its spelling in future dictations. Edit or remove saved rules under **Settings → Text replacements**.
+
 ## Build
 
 On an Apple Silicon Mac with Xcode 26 or newer selected and CMake on PATH, run these commands.

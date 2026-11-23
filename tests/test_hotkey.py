@@ -17,12 +17,12 @@ class HotkeyManagerTests(unittest.TestCase):
         self.keyboard = keyboard_patcher.start()
         self.on_start = Mock()
         self.on_stop = Mock()
-        self.manager = HotkeyManager(self.on_start, self.on_stop)
+        self.on_copy = Mock()
+        self.on_cancel = Mock()
+        self.manager = HotkeyManager(self.on_start, self.on_stop, on_cancel=self.on_cancel, on_copy=self.on_copy)
 
     def dispatch(self, event):
-        if event.name in self.manager.WIN_NAMES:
-            return self.manager._on_win_key_event(event)
-        return self.manager._on_ctrl_key_event(event)
+        return self.manager._handle_event(event)
 
     def test_repeated_chords_stop_on_first_modifier_release(self):
         for cycle in range(3):
@@ -37,8 +37,7 @@ class HotkeyManagerTests(unittest.TestCase):
             self.assertEqual(self.on_start.call_count, cycle + 1)
             self.assertEqual(self.on_stop.call_count, cycle + 1)
 
-        self.assertFalse(self.manager._pressed_ctrl_keys)
-        self.assertFalse(self.manager._pressed_win_keys)
+        self.assertFalse(self.manager._pressed)
 
     def test_ctrl_v_does_not_trigger_after_dictation(self):
         self.dispatch(key_event("left ctrl", "down", 29))
@@ -55,8 +54,8 @@ class HotkeyManagerTests(unittest.TestCase):
         self.on_stop.assert_called_once_with()
 
     def test_ctrl_release_allows_win_hook_to_finish_before_synthetic_release(self):
-        self.dispatch(key_event("left ctrl", "down", 29))
         self.dispatch(key_event("left windows", "down", 91))
+        self.dispatch(key_event("left ctrl", "down", 29))
         finished = Event()
         hook_progress = []
 
@@ -72,12 +71,12 @@ class HotkeyManagerTests(unittest.TestCase):
             win_hook.start()
             hook_progress.append(finished.wait(timeout=1))
 
-        self.keyboard.press.side_effect = inject_ctrl_down
+        self.keyboard.send.side_effect = lambda keys, **kwargs: inject_ctrl_down(keys) if keys == "ctrl" else None
         self.dispatch(key_event("left ctrl", "up", 29))
         win_hook.join(timeout=1)
 
         self.assertEqual(hook_progress, [True])
-        self.assertFalse(self.manager._pressed_win_keys)
+        self.assertFalse(self.manager._pressed)
         self.on_stop.assert_called_once_with()
 
     def test_releasing_one_of_two_ctrl_keys_keeps_chord_active(self):
@@ -103,22 +102,22 @@ class HotkeyManagerTests(unittest.TestCase):
         self.manager.set_paused(False)
 
         self.assertFalse(self.manager.is_active)
-        self.assertFalse(self.manager._pressed_ctrl_keys)
-        self.assertFalse(self.manager._pressed_win_keys)
+        self.assertFalse(self.manager._pressed)
         self.on_stop.assert_called_once_with()
 
-    def test_forced_cancel_unblocks_windows_key(self):
+    def test_forced_stop_disarms_until_released(self):
         self.dispatch(key_event("left ctrl", "down", 29))
         self.dispatch(key_event("left windows", "down", 91))
 
         self.manager.cancel_active()
 
         self.assertFalse(self.manager.is_active)
-        self.assertFalse(self.manager.win_blocked)
-        self.assertFalse(self.manager._pressed_ctrl_keys)
-        self.assertFalse(self.manager._pressed_win_keys)
-        self.keyboard.release.assert_any_call("left windows")
-        self.keyboard.release.assert_any_call("right windows")
+        self.assertFalse(self.dispatch(key_event("left windows", "down", 91)))
+        self.assertFalse(self.dispatch(key_event("left windows", "up", 91)))
+        self.dispatch(key_event("left ctrl", "up", 29))
+        self.assertFalse(self.manager._pressed)
+        self.on_start.assert_called_once_with()
+        self.on_stop.assert_not_called()
 
     def test_win_released_first_does_not_leave_phantom_chord(self):
         self.dispatch(key_event("left ctrl", "down", 29))
@@ -135,6 +134,49 @@ class HotkeyManagerTests(unittest.TestCase):
         self.assertFalse(suppress_up)
         self.on_start.assert_called_once_with()
         self.on_stop.assert_called_once_with()
+
+
+    def test_copy_chord_abandons_the_provisional_capture(self):
+        self.dispatch(key_event("left ctrl", "down", 29))
+        self.dispatch(key_event("left windows", "down", 91))
+        self.assertFalse(self.dispatch(key_event("м", "down", 47)))
+        self.assertFalse(self.dispatch(key_event("v", "down", 47)))
+        self.dispatch(key_event("left ctrl", "up", 29))
+        self.assertFalse(self.dispatch(key_event("v", "up", 47)))
+        self.dispatch(key_event("left windows", "up", 91))
+        self.on_copy.assert_called_once_with()
+        self.on_cancel.assert_called_once_with(False)
+        self.on_stop.assert_not_called()
+
+    def test_default_toggle_and_copy_do_not_overlap(self):
+        self.manager.configure("ctrl+win", "toggle", True)
+        self.dispatch(key_event("left ctrl", "down", 29))
+        self.dispatch(key_event("left windows", "down", 91))
+        self.dispatch(key_event("left windows", "up", 91))
+        self.on_start.assert_called_once()
+        self.dispatch(key_event("left windows", "down", 91))
+        self.dispatch(key_event("v", "down", 47))
+        self.dispatch(key_event("v", "up", 47))
+        self.dispatch(key_event("left windows", "up", 91))
+        self.on_copy.assert_called_once()
+        self.on_stop.assert_not_called()
+        self.dispatch(key_event("left windows", "down", 91))
+        self.dispatch(key_event("left windows", "up", 91))
+        self.on_stop.assert_called_once()
+
+    def test_space_preset_toggles_on_press_and_escape_cancels_to_history(self):
+        self.manager.configure("ctrl+alt+space", "toggle", True)
+        self.dispatch(key_event("left ctrl", "down", 29))
+        self.dispatch(key_event("left alt", "down", 56))
+        self.assertFalse(self.dispatch(key_event("space", "down", 57)))
+        self.assertFalse(self.dispatch(key_event("space", "down", 57)))
+        self.assertFalse(self.dispatch(key_event("space", "up", 57)))
+        self.on_start.assert_called_once()
+        self.assertFalse(self.dispatch(key_event("escape", "down", 1)))
+        self.assertFalse(self.dispatch(key_event("escape", "up", 1)))
+        self.on_cancel.assert_called_once_with(True)
+        self.on_stop.assert_not_called()
+        self.assertTrue(self.dispatch(key_event("escape", "down", 1)))
 
 
 if __name__ == "__main__":

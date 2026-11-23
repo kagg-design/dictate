@@ -80,7 +80,7 @@ This starts Dictate in the system tray. Click its icon or choose **Dictate** in 
 Build on an x64 Windows PC with Python 3.12 (including Tk) and [Inno Setup 6](https://jrsoftware.org/isdl.php). From the repository root, run this in PowerShell. Substitute the path to `ISCC.exe` if necessary.
 
 ```powershell
-py -3.12 scripts/build_windows.py --compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' --version 0.1.0
+py -3.12 scripts/build_windows.py --compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' --version 0.2.0
 ```
 
 The build checks the packaged Python runtime and produces `Dictate-Setup-x64.exe` and `Dictate-Setup-x64.exe.sha256` in `artifacts/windows/`. Attach both files to a GitHub Release for the matching tag. The binary is a Release asset and stays out of the source tree.
@@ -107,13 +107,13 @@ Set **Microphone pre-roll** in Settings to keep a short amount of sound from bef
 
 During recording, Fluid Speech Mini processes overlapping audio windows, including continuous speech. Whisper processes completed phrases at pauses. Dictate assembles the final dictation and inserts it once when you release the hotkey.
 
-## Adding to Windows Startup
+In **Settings**, choose a dictation shortcut and **Hold to dictate** or **Press to start / stop**. With the default `Ctrl+Win` in press-to-toggle mode, release the keys to start or stop. **Copy Last Dictation** in the tray and `Ctrl+Win+V` both copy the most recent transcript.
 
-To launch this application automatically when Windows starts:
-1. Right-click on the `run.bat` file in this directory and select **Show more options** -> **Create shortcut**.
-2. Rename the new shortcut to `Dictate`.
-3. Press `Win + R`, type `shell:startup`, and press Enter. This opens the Windows Startup folder.
-4. Drag and drop the `Dictate` shortcut into the Startup folder.
+When **Esc cancels and keeps text in History** is enabled, `Esc` ends the recording and saves any recognized text without inserting it. **Show live transcript while dictating** is off by default. **Use text around the cursor** adjusts the inserted text to fit the field when its content is available.
+
+Enable **Start Dictate at login** in **Settings** to start in the tray when you sign in.
+
+To fix a spelling for future dictations, select a word or phrase in **History** and choose **Add replacement…**. Edit or remove saved rules under **Settings → Manage replacements…**.
 
 ---
 

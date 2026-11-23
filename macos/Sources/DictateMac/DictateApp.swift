@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import AVFoundation
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -67,6 +68,8 @@ private struct DictateMenu: View {
             openWindow(id: "dictate")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Button("Copy Last Dictation") { state.copyLatest() }
+            .disabled(state.history.isEmpty)
         Divider()
         Text(state.status)
         Button("Quit Dictate") { NSApp.terminate(nil) }
@@ -79,6 +82,14 @@ final class DictateState: ObservableObject {
     @Published private(set) var selectedModel: SpeechModel
     @Published private(set) var preRoll: Int
     @Published private(set) var saveWav: Bool
+    @Published private(set) var shortcutChoice: ShortcutChoice
+    @Published private(set) var toggleMode: Bool
+    @Published private(set) var escapeCancels: Bool
+    @Published private(set) var livePreview: Bool
+    @Published private(set) var useCursorContext: Bool
+    @Published private(set) var replacements: TextReplacements
+    @Published private(set) var loginEnabled = false
+    @Published private(set) var loginRequiresApproval = false
     @Published private(set) var status = "Starting Dictate…"
     @Published private(set) var microphoneAllowed = false
     @Published private(set) var keyboardAllowed = false
@@ -96,6 +107,7 @@ final class DictateState: ObservableObject {
     private var session: Session?
     private var player: AVAudioPlayer?
     private var maySaveHistory = true
+    private var preview: DictationPreview?
 
     private final class Session {
         let target = InsertionTarget()
@@ -117,15 +129,29 @@ final class DictateState: ObservableObject {
         let saved = defaults.object(forKey: "preRoll") as? Int ?? 500
         preRoll = [0, 250, 500, 1_000].contains(saved) ? saved : 500
         saveWav = defaults.bool(forKey: "saveWav")
+        shortcutChoice = defaults.string(forKey: "shortcut").flatMap(ShortcutChoice.init(rawValue:)) ?? .controlOption
+        toggleMode = defaults.bool(forKey: "toggleMode")
+        escapeCancels = defaults.object(forKey: "escapeCancels") as? Bool ?? true
+        livePreview = defaults.bool(forKey: "livePreview")
+        useCursorContext = defaults.object(forKey: "useCursorContext") as? Bool ?? true
+        replacements = TextReplacements(defaults.dictionary(forKey: "textReplacements") as? [String: String] ?? [:])
         do {
             history = try DictateFiles.loadHistory()
         } catch {
             maySaveHistory = false
             status = "Could not read the existing history."
         }
-        shortcut.changed = { [weak self] held in
+        shortcut.choice = shortcutChoice
+        shortcut.toggle = toggleMode
+        shortcut.escapeCancels = escapeCancels
+        shortcut.changed = { [weak self] action in
             DispatchQueue.main.async {
-                if held { self?.start() } else { self?.finish() }
+                switch action {
+                case .start: self?.start()
+                case .finish: self?.finish()
+                case .cancel: self?.finish(insert: false)
+                case .copy: self?.copyLatest()
+                }
             }
         }
         refreshPermissions()
@@ -160,9 +186,9 @@ final class DictateState: ObservableObject {
             do { try recorder.setPreRoll(preRoll, microphoneAllowed: allowed) }
             catch { status = error.localizedDescription }
         }
-        shortcut.install()
-        if keyboardAllowed != shortcut.installed { keyboardAllowed = shortcut.installed }
         let trusted = AXIsProcessTrusted()
+        shortcut.install(filterKeys: trusted)
+        if keyboardAllowed != shortcut.installed { keyboardAllowed = shortcut.installed }
         if insertionAllowed != trusted { insertionAllowed = trusted }
     }
 
@@ -200,6 +226,81 @@ final class DictateState: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "saveWav")
     }
 
+    func setShortcut(_ choice: ShortcutChoice) {
+        shortcutChoice = choice
+        shortcut.choice = choice
+        UserDefaults.standard.set(choice.rawValue, forKey: "shortcut")
+    }
+
+    func setToggleMode(_ enabled: Bool) {
+        toggleMode = enabled
+        shortcut.toggle = enabled
+        UserDefaults.standard.set(enabled, forKey: "toggleMode")
+    }
+
+    func setEscapeCancels(_ enabled: Bool) {
+        escapeCancels = enabled
+        shortcut.escapeCancels = enabled
+        UserDefaults.standard.set(enabled, forKey: "escapeCancels")
+    }
+
+    func setLivePreview(_ enabled: Bool) {
+        livePreview = enabled
+        if !enabled { preview?.hide() }
+        UserDefaults.standard.set(enabled, forKey: "livePreview")
+    }
+
+    func setUseCursorContext(_ enabled: Bool) {
+        useCursorContext = enabled
+        UserDefaults.standard.set(enabled, forKey: "useCursorContext")
+    }
+
+    func refreshLoginStatus() {
+        let current = SMAppService.mainApp.status
+        loginEnabled = current == .enabled || current == .requiresApproval
+        loginRequiresApproval = current == .requiresApproval
+    }
+
+    func setStartAtLogin(_ enabled: Bool) {
+        defer { refreshLoginStatus() }
+        do {
+            if enabled { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+        } catch {
+            status = "Could not change login settings. " + error.localizedDescription
+        }
+    }
+
+    func copyLatest() {
+        if let last = history.first { copy(last) }
+    }
+
+    func saveReplacement(_ draft: ReplacementDraft) throws {
+        let source = draft.source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = draft.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, !value.isEmpty else {
+            throw DictateError("Enter both the recognized text and its replacement.")
+        }
+        var rules = replacements.saved
+        if let previous = draft.previous { rules.removeValue(forKey: previous) }
+        guard !rules.keys.contains(where: { $0.caseInsensitiveCompare(source) == .orderedSame }) else {
+            throw DictateError("A replacement for this text already exists.")
+        }
+        rules[source] = value
+        storeReplacements(rules)
+    }
+
+    func removeReplacement(_ source: String) {
+        var rules = replacements.saved
+        rules.removeValue(forKey: source)
+        storeReplacements(rules)
+    }
+
+    private func storeReplacements(_ rules: [String: String]) {
+        UserDefaults.standard.set(rules, forKey: "textReplacements")
+        replacements = TextReplacements(rules)
+    }
+
     func copy(_ entry: HistoryEntry) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(entry.text, forType: .string)
@@ -216,9 +317,17 @@ final class DictateState: ObservableObject {
     }
 
     private func start() {
-        guard !busy else { return }
-        guard microphoneAllowed else { status = "Allow microphone access in Dictate settings."; return }
-        guard modelReady else { status = "Load a speech model in Dictate settings."; return }
+        guard !busy else { shortcut.disarm(); return }
+        guard microphoneAllowed else {
+            shortcut.disarm()
+            status = "Allow microphone access in Dictate settings."
+            return
+        }
+        guard modelReady else {
+            shortcut.disarm()
+            status = "Load a speech model in Dictate settings."
+            return
+        }
         do {
             let session = Session(model: selectedModel)
             try recorder.start()
@@ -226,6 +335,7 @@ final class DictateState: ObservableObject {
             recording = true
             status = "Recording"
         } catch {
+            shortcut.disarm()
             status = error.localizedDescription
         }
     }
@@ -233,7 +343,7 @@ final class DictateState: ObservableObject {
     private func update() {
         refreshPermissions()
         guard recording, let session else { return }
-        if recorder.sampleCount >= 16_000 * 600 { finish(); return }
+        if recorder.sampleCount >= 16_000 * 600 { shortcut.disarm(); finish(); return }
         guard session.pending == nil else { return }
         let samples = recorder.snapshot(after: session.consumed)
         guard let cut = PhraseBoundary.last(in: samples), cut > session.attempted else { return }
@@ -245,13 +355,18 @@ final class DictateState: ObservableObject {
                 session.parts.append(text)
                 session.consumed += cut
                 session.attempted = 0
+                if self.recording && self.livePreview {
+                    if self.preview == nil { self.preview = DictationPreview() }
+                    self.preview?.show(String(session.parts.joined(separator: " ").suffix(180)))
+                }
             }
         }
     }
 
-    private func finish() {
+    private func finish(insert: Bool = true) {
         guard recording, let session else { return }
         recording = false
+        preview?.hide()
         finishing = true
         status = "Finishing dictation…"
         let interrupted = recorder.interrupted
@@ -274,7 +389,7 @@ final class DictateState: ObservableObject {
                     let tail = try await engine.transcribe(Array(samples.dropFirst(session.consumed)))
                     if !tail.isEmpty { session.parts.append(tail) }
                 }
-                let full = session.parts.joined(separator: " ")
+                let full = replacements.apply(session.parts.joined(separator: " "))
                 guard !full.isEmpty else { status = interrupted ? "Microphone stopped responding." : "No speech recognized."; return }
                 let id = UUID()
                 let audioFile = keepWav ? try? DictateFiles.saveAudio(samples, id: id) : nil
@@ -289,8 +404,10 @@ final class DictateState: ObservableObject {
                         }
                     }
                 }
-                let inserted = session.target?.insert(full) ?? false
-                if interrupted {
+                let inserted = insert && (session.target?.insert(full, useCursorContext: useCursorContext) ?? false)
+                if !insert {
+                    status = "Insertion canceled. Text available in History."
+                } else if interrupted {
                     status = "Microphone interrupted. Check the transcript in History."
                 } else {
                     status = inserted ? "Ready to dictate" : "Text available in History. Check Accessibility and the focused field."
@@ -305,6 +422,7 @@ final class DictateState: ObservableObject {
 private struct DictateWindow: View {
     @ObservedObject var state: DictateState
     @State private var tab = "Settings"
+    @State private var replacementDraft: ReplacementDraft?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -317,6 +435,9 @@ private struct DictateWindow: View {
         }
         .padding(20)
         .frame(minWidth: 610, minHeight: 480)
+        .sheet(item: $replacementDraft) { draft in
+            ReplacementEditor(draft: draft, save: state.saveReplacement)
+        }
     }
 
     private var settings: some View {
@@ -328,8 +449,20 @@ private struct DictateWindow: View {
                 .disabled(state.busy)
                 Button("Load selected model") { state.chooseModel(state.selectedModel) }
                     .disabled(state.busy)
-                LabeledContent("Hold to dictate", value: "Control + Option (⌃⌥)")
             }
+            Section("Dictation controls") {
+                Picker("Shortcut", selection: Binding(get: { state.shortcutChoice }, set: state.setShortcut)) {
+                    ForEach(ShortcutChoice.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Toggle("Press to start / stop", isOn: Binding(get: { state.toggleMode }, set: state.setToggleMode))
+                Toggle("Esc cancels and keeps text in History",
+                       isOn: Binding(get: { state.escapeCancels }, set: state.setEscapeCancels))
+                Toggle("Show live transcript while dictating",
+                       isOn: Binding(get: { state.livePreview }, set: state.setLivePreview))
+                Toggle("Use text around the cursor",
+                       isOn: Binding(get: { state.useCursorContext }, set: state.setUseCursorContext))
+            }
+            .disabled(state.busy)
             Section("Microphone and history") {
                 Picker("Pre-roll", selection: Binding(get: { state.preRoll }, set: state.setPreRoll)) {
                     ForEach([0, 250, 500, 1_000], id: \.self) { Text("\($0) ms").tag($0) }
@@ -338,28 +471,50 @@ private struct DictateWindow: View {
                 Text("At 0 ms the ring buffer is off and the microphone opens only for dictation. When enabled, the mic stays open and only the selected duration of recent audio is held in memory before dictation.")
                     .font(.callout).foregroundStyle(.secondary)
                 Toggle("Save WAV files in History", isOn: Binding(get: { state.saveWav }, set: state.setSaveWav))
+                Toggle("Start Dictate at login", isOn: Binding(get: { state.loginEnabled }, set: state.setStartAtLogin))
+                if state.loginRequiresApproval {
+                    Text("Allow Dictate under System Settings → General → Login Items.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
             Section("macOS permissions") {
                 permission("Microphone", enabled: state.microphoneAllowed, request: state.requestMicrophone)
                 permission("Input Monitoring", enabled: state.keyboardAllowed, request: state.requestKeyboard)
                 permission("Accessibility", enabled: state.insertionAllowed, request: state.requestInsertion)
             }
+            Section("Text replacements") {
+                Button("Add replacement…") { replacementDraft = ReplacementDraft() }
+                ForEach(state.replacements.rules) { rule in
+                    LabeledContent {
+                        HStack {
+                            Button("Edit…") {
+                                replacementDraft = ReplacementDraft(
+                                    source: rule.source, value: rule.replacement, previous: rule.source
+                                )
+                            }
+                            Button("Remove") { state.removeReplacement(rule.source) }
+                        }.buttonStyle(.borderless)
+                    } label: {
+                        Text(rule.source)
+                        Text(rule.replacement)
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
+        .onAppear { state.refreshLoginStatus() }
     }
 
     private var history: some View {
         List(state.history) { entry in
-            VStack(alignment: .leading, spacing: 6) {
-                Text(entry.date.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(entry.text).textSelection(.enabled)
-                HStack {
-                    Button("Copy") { state.copy(entry) }
-                    if entry.audioFile != nil { Button("Play WAV") { state.play(entry) } }
+            HistoryRow(entry: entry, state: state) { selected in
+                let existing = state.replacements.rules.first {
+                    $0.source.caseInsensitiveCompare(selected) == .orderedSame
                 }
+                replacementDraft = ReplacementDraft(
+                    source: existing?.source ?? selected, value: existing?.replacement ?? "", previous: existing?.source
+                )
             }
-            .padding(.vertical, 6)
         }
         .overlay {
             if state.history.isEmpty { ContentUnavailableView("No dictations yet", systemImage: "waveform") }
@@ -371,5 +526,27 @@ private struct DictateWindow: View {
             if enabled { Text("Granted").foregroundStyle(.secondary) }
             else { Button("Allow", action: request) }
         }
+    }
+}
+
+private struct HistoryRow: View {
+    let entry: HistoryEntry
+    let state: DictateState
+    let addReplacement: (String) -> Void
+    @State private var selection = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.date.formatted(date: .abbreviated, time: .shortened))
+                .font(.caption).foregroundStyle(.secondary)
+            HistoryTranscript(text: entry.text, selection: $selection)
+            HStack {
+                Button("Copy") { state.copy(entry) }
+                if entry.audioFile != nil { Button("Play WAV") { state.play(entry) } }
+                Button("Add replacement…") { addReplacement(selection) }.disabled(selection.isEmpty)
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 6)
     }
 }

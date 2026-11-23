@@ -1,5 +1,7 @@
 """Recording indicator owned by the desktop Tk thread."""
 
+import ctypes
+from ctypes import wintypes
 import tkinter as tk
 
 
@@ -19,6 +21,18 @@ class RecordingOverlay:
         x = (self.window.winfo_screenwidth() - SIZE) // 2
         y = self.window.winfo_screenheight() - SIZE - 52
         self.window.geometry(f"{SIZE}x{SIZE}+{x}+{y}")
+        self._preview = tk.Toplevel(root)
+        self._preview.withdraw()
+        self._preview.overrideredirect(True)
+        self._preview.attributes("-topmost", True)
+        width = min(480, self.window.winfo_screenwidth() - 40)
+        self._preview.geometry(f"{width}x66+{(self.window.winfo_screenwidth() - width) // 2}+{y - 74}")
+        self._preview_label = tk.Label(
+            self._preview, bg="#242424", fg="#f5f5f5", font=("Inter", 11),
+            justify="left", wraplength=width - 28, padx=14, pady=8,
+        )
+        self._preview_label.pack(fill="both", expand=True)
+        self._preview_text = ""
 
         self.canvas = tk.Canvas(
             self.window, width=SIZE, height=SIZE, bg=TRANSPARENT, highlightthickness=0
@@ -66,3 +80,31 @@ class RecordingOverlay:
                 self.window.after_cancel(self._animation)
                 self._animation = None
             self.window.withdraw()
+            self.set_preview("")
+
+    def set_preview(self, text):
+        text = text if self._animation is not None else ""
+        if text == self._preview_text:
+            return
+        self._preview_text = text
+        if text:
+            self._preview_label.configure(text=text)
+            if not self._preview.winfo_ismapped():
+                self._preview.update_idletasks()
+                self._prevent_preview_activation()
+            self._preview.deiconify()
+        else:
+            self._preview.withdraw()
+
+    def _prevent_preview_activation(self):
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+        user32.GetWindowLongW.restype = ctypes.c_long
+        user32.SetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_long)
+        user32.SetWindowLongW.restype = ctypes.c_long
+        hwnd = user32.GetAncestor(self._preview.winfo_id(), 2)
+        # Keep the original text field focused when the preview appears.
+        extended_style = user32.GetWindowLongW(hwnd, -20)
+        user32.SetWindowLongW(hwnd, -20, extended_style | 0x08000000 | 0x00000020)

@@ -13,6 +13,7 @@ class CompletedCapture:
     live: "LiveTranscription"
     audio: np.ndarray
     save_wav: bool = False
+    insert: bool = True
 
 
 class LiveTranscription:
@@ -74,6 +75,14 @@ class LiveTranscription:
 
     def _pending_audio(self):
         return np.concatenate(self._pending, axis=0)
+
+    def preview(self):
+        parts = self._parts
+        if self._rolling is not None:
+            tail = self._rolling.preview()
+            if tail:
+                parts = [*parts, tail]
+        return " ".join(parts)[-180:].lstrip()
 
     def _find_pause(self, pending_samples, window_size):
         blocks = []
@@ -190,6 +199,13 @@ class RollingTranscription:
             )
             for word in transcriber.transcribe_words(audio)
         ]
+
+    def preview(self):
+        if self._latest is None:
+            return ""
+        _, start, words = self._latest
+        merged = self._merge(words, start)
+        return " ".join(word.text for word in (merged if merged is not None else self._confirmed)[-45:])
 
     def _merge(self, words, start):
         if start == 0:

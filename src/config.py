@@ -11,6 +11,11 @@ _config_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "hotkey": "ctrl+win",
+    "hotkey_mode": "hold",
+    "escape_cancels": True,
+    "live_preview": False,
+    "use_cursor_context": True,
+    "text_replacements": {},
     "recognition_model": "whisper",
     "microphone": None,
     "save_wav": False,
@@ -22,7 +27,6 @@ DEFAULT_CONFIG = {
     "sample_rate": 16000,    # 16 kHz mono
     "min_duration": 0.3,     # discard shorter than 300 ms
     "show_startup_notifications": True,
-    "show_overlay_indicator": True,
     "latency": 0.08,
     "ring_buffer_duration": 0.5,
     "vad_filter": True,

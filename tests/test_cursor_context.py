@@ -25,6 +25,8 @@ class CursorFormattingTests(unittest.TestCase):
             ("api_key.", CursorContext("", ""), "api_key. "),
             ("I agree.", CursorContext("I think ", " with that."), "I agree"),
             ("Пример.", None, "Пример. "),
+            (" \tПример.", None, "Пример. "),
+            (" \tПример.", CursorContext("", ""), "Пример. "),
         )
         for text, context, expected in cases:
             with self.subTest(text=text, context=context):
@@ -75,3 +77,12 @@ class SelectionContextTests(unittest.TestCase):
 
         self.assertIsNone(_read_focused_selection(self.automation, self.uia))
         self.ranges.GetElement.assert_not_called()
+
+    def test_empty_left_range_does_not_read_provider_placeholder(self):
+        selection = self.ranges.GetElement.return_value
+        before, after = Mock(), Mock()
+        selection.Clone.side_effect = [before, after]
+        before.MoveEndpointByUnit.return_value = 0
+        after.GetText.return_value = ""
+        self.assertEqual(_read_focused_selection(self.automation, self.uia), CursorContext("", "", search_field=True))
+        before.GetText.assert_not_called()

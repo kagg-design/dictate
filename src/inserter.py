@@ -83,7 +83,7 @@ class GUITHREADINFO(ctypes.Structure):
     )
 
 
-def paste_text(text):
+def paste_text(text, *, use_cursor_context=True):
     """Insert text into the focused Windows control without using the clipboard."""
     if not text:
         logger.info("No text to insert. Skipping text insertion.")
@@ -95,7 +95,9 @@ def paste_text(text):
 
     try:
         _wait_for_modifiers_released()
-        text_to_insert = format_for_cursor(text, _read_insert_context())
+        text_to_insert = (
+            format_for_cursor(text, _read_insert_context()) if use_cursor_context else text.strip(" \t")
+        )
         if not text_to_insert:
             return
         logger.info("Inserting text directly (%d characters).", len(text_to_insert))

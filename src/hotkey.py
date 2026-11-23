@@ -1,199 +1,215 @@
+"""Global shortcuts for dictating, canceling and copying the last transcript."""
+
+from queue import SimpleQueue
+from threading import Lock, Thread
+from time import monotonic
+
 import keyboard
-import threading
-from time import perf_counter
 
 from src.logger import logger
 
 
+SHORTCUTS = {
+    "ctrl+win": "Ctrl+Win",
+    "ctrl+alt+space": "Ctrl+Alt+Space",
+    "ctrl+shift+space": "Ctrl+Shift+Space",
+}
+MODES = {"hold": "Hold to dictate", "toggle": "Press to start / stop"}
+DEFAULT_SHORTCUT = "ctrl+win"
+COPY_MODIFIERS = frozenset({"ctrl", "win"})
+MODIFIERS = frozenset({"ctrl", "win", "alt", "shift", "alt gr"})
+
+
 class HotkeyManager:
-    """Track the physical Ctrl+Win push-to-talk chord."""
-
-    CTRL_NAMES = frozenset({"ctrl", "left ctrl", "right ctrl"})
-    WIN_NAMES = frozenset({"windows", "left windows", "right windows"})
-
-    def __init__(self, on_trigger_start, on_trigger_stop):
+    def __init__(self, on_trigger_start, on_trigger_stop, *, on_cancel=None, on_copy=None,
+                 shortcut=DEFAULT_SHORTCUT, mode="hold", escape_cancels=True):
         self.on_trigger_start = on_trigger_start
         self.on_trigger_stop = on_trigger_stop
-
+        self.on_cancel = on_cancel
+        self.on_copy = on_copy
+        self.shortcut = shortcut if isinstance(shortcut, str) and shortcut in SHORTCUTS else DEFAULT_SHORTCUT
+        self.mode = mode if isinstance(mode, str) and mode in MODES else "hold"
+        self.escape_cancels = escape_cancels
         self.is_active = False
-        self.win_blocked = False
         self.paused = False
-        self.hook_handle = None
-        self._hook_handles = []
-        self._state_lock = threading.RLock()
+        self._pressed = {}
+        self._suppressed = set()
+        self._chord_down = False
+        self._toggle_armed = False
+        self._hold_started = 0.0
+        self._win_needs_release = False
+        self._state_lock = Lock()
+        self._hook = None
+        self._actions = None
 
-        # Keep the sides separate so releasing one Ctrl/Win does not erase the
-        # state of the other side when both are held.
-        self._pressed_ctrl_keys = set()
-        self._pressed_win_keys = set()
+    def configure(self, shortcut, mode, escape_cancels):
+        with self._state_lock:
+            self.shortcut = shortcut
+            self.mode = mode
+            self.escape_cancels = escape_cancels
+            # Disarm a combination already held while applying the settings.
+            self._chord_down = self._matches()
+            self._toggle_armed = False
 
     def start_listening(self):
-        """Register Ctrl observation and selective Windows-key suppression."""
-        logger.info("Registering global modifier key hooks...")
+        actions = SimpleQueue()
+        self._actions = actions
         try:
-            self._reset_key_state()
-            self._hook_handles = [
-                keyboard.hook_key("ctrl", self._on_ctrl_key_event),
-                keyboard.hook_key(
-                    "left windows", self._on_win_key_event, suppress=True
-                ),
-                keyboard.hook_key(
-                    "right windows", self._on_win_key_event, suppress=True
-                ),
-            ]
-            self.hook_handle = self._hook_handles[0]
-            logger.info("Global modifier key hooks registered successfully.")
-        except Exception as e:
-            for handle in self._hook_handles:
-                try:
-                    keyboard.unhook(handle)
-                except Exception:
-                    pass
-            self._hook_handles = []
-            self.hook_handle = None
-            logger.error(f"Failed to register global modifier key hooks: {e}")
-            logger.error("Make sure to run the application with Administrator privileges.")
+            self._hook = keyboard.hook(self._handle_event, suppress=True)
+        except Exception:
+            self._actions = None
             raise
+        Thread(target=self._run_actions, args=(actions,), name="DictateHotkeys", daemon=True).start()
+        logger.info("Global dictation shortcuts registered.")
 
     def stop_listening(self):
-        """Unregister the hook and restore the Windows keys."""
-        if self._hook_handles:
-            logger.info("Unregistering global modifier key hooks...")
-            for handle in self._hook_handles:
-                try:
-                    keyboard.unhook(handle)
-                except Exception as e:
-                    logger.error(f"Error unhooking keyboard listener: {e}")
-            self._hook_handles = []
-            self.hook_handle = None
-        elif self.hook_handle:
-            try:
-                keyboard.unhook(self.hook_handle)
-            except Exception as e:
-                logger.error(f"Error unhooking keyboard listener: {e}")
-            self.hook_handle = None
-
-        self.is_active = False
-        self._reset_key_state()
-        self._unblock_win_keys()
+        if self._hook is not None:
+            keyboard.unhook(self._hook)
+            self._hook = None
+        if self._actions is not None:
+            self._actions.put(None)
+            self._actions = None
+        with self._state_lock:
+            restore_win = self._win_needs_release
+            self._win_needs_release = False
+            self._pressed.clear()
+            self._suppressed.clear()
+            self.is_active = self._chord_down = self._toggle_armed = False
+        if restore_win:
+            self._restore_windows_key_state()
 
     def set_paused(self, paused):
-        """Pause or resume push-to-talk handling."""
-        self.paused = paused
-
-        if paused and self.is_active:
-            logger.info("Hotkey manager paused while recording was active. Stopping recording.")
-            self.is_active = False
-            try:
-                self.on_trigger_stop()
-            except Exception as e:
-                logger.error(f"Error executing stop trigger on pause: {e}")
-
-        # Key-up events are intentionally ignored while paused. Reset on both
-        # transitions so those ignored events cannot leave a stale chord behind.
-        self._reset_key_state()
-        self._unblock_win_keys()
+        with self._state_lock:
+            self.paused = paused
+            stop = paused and self.is_active
+            if stop:
+                self.is_active = False
+            self._toggle_armed = False
+        if stop:
+            self._schedule(self.on_trigger_stop)
 
     def cancel_active(self):
-        """Reset a forced-stop session and restore all blocked key state."""
-        self.is_active = False
-        self._reset_key_state()
-        self._unblock_win_keys()
-
-    def _on_ctrl_key_event(self, event):
-        """Handle Ctrl asynchronously through the library's regular hook path."""
-        self._handle_modifier_event(event)
-
-    def _on_win_key_event(self, event):
-        """Observe every Win transition before selectively suppressing it."""
-        return self._handle_modifier_event(event)
-
-    def _handle_modifier_event(self, event):
-        """Update physical modifier state and transition the PTT session."""
-        restore_windows_keys = False
+        """Disarm recording after the recorder's hard time limit."""
         with self._state_lock:
-            if self.paused:
-                return True
+            self.is_active = False
+            self._toggle_armed = False
 
-            was_active = self.is_active
-            name = event.name
-            if name in self.CTRL_NAMES:
-                self._update_pressed_keys(self._pressed_ctrl_keys, event)
-            elif name in self.WIN_NAMES:
-                self._update_pressed_keys(self._pressed_win_keys, event)
+    def _matches(self):
+        keys = set(self._pressed.values())
+        required = set(self.shortcut.split("+"))
+        return keys & MODIFIERS == required & MODIFIERS and required <= keys
+
+    def _handle_event(self, event):
+        # The Windows hook only tracks keys and queues actions. Recording and
+        # clipboard work can block, so they run on the ordered worker instead.
+        name = (event.name or "").removeprefix("left ").removeprefix("right ")
+        if name == "windows":
+            name = "win"
+        elif name == "escape":
+            name = "esc"
+        elif event.scan_code == 0x2F:  # physical V, including non-Latin keyboard layouts
+            name = "v"
+        if name not in MODIFIERS and name not in {"v", "esc", "space"}:
+            return True
+        key = (event.scan_code, event.name if name in MODIFIERS else name)
+        down = event.event_type == "down"
+        actions = []
+        with self._state_lock:
+            repeat = key in self._pressed
+            if down:
+                self._pressed[key] = name
             else:
-                return True
+                self._pressed.pop(key, None)
+            modifiers = MODIFIERS.intersection(self._pressed.values())
+            previous, self._chord_down = self._chord_down, self._matches()
+            consume = key in self._suppressed
 
-            chord_pressed = bool(self._pressed_ctrl_keys and self._pressed_win_keys)
-            if chord_pressed and not self.is_active:
-                logger.info("Hotkey combination triggered: Ctrl+Win are now held down.")
-                self.is_active = True
-                self._block_win_keys()
-                try:
-                    self.on_trigger_start()
-                except Exception as e:
-                    logger.error(f"Error executing on_trigger_start callback: {e}")
-            elif not chord_pressed and self.is_active:
-                logger.info("Hotkey combination released: %s went up.", name)
-                self.is_active = False
-                try:
-                    self.on_trigger_stop()
-                except Exception as e:
-                    logger.error(f"Error executing on_trigger_stop callback: {e}")
-                finally:
-                    restore_windows_keys = self._end_win_suppression()
+            if down and not repeat and name == "v" and modifiers == COPY_MODIFIERS and self.on_copy:
+                consume = True
+                self._toggle_armed = False
+                if (self.is_active and self.shortcut == DEFAULT_SHORTCUT and self.mode == "hold"
+                        and monotonic() - self._hold_started < 0.35):
+                    self.is_active = False
+                    actions.append((self.on_cancel, (False,)))
+                actions.append((self.on_copy, ()))
+            elif down and not repeat and name == "esc" and self.escape_cancels and self.is_active and self.on_cancel:
+                consume = True
+                self.is_active = self._toggle_armed = False
+                actions.append((self.on_cancel, (True,)))
+            elif not self.paused:
+                if self._chord_down and not previous and down:
+                    consume |= name == "space"
+                    if self.mode == "toggle" and self.shortcut == DEFAULT_SHORTCUT:
+                        # Decide on release so a following V can select Copy.
+                        self._toggle_armed = True
+                    else:
+                        self.is_active = not self.is_active
+                        if self.mode == "hold":
+                            self._hold_started = monotonic()
+                        actions.append((self.on_trigger_start if self.is_active else self.on_trigger_stop, ()))
+                elif previous and not self._chord_down:
+                    if self._toggle_armed and not down:
+                        self.is_active = not self.is_active
+                        actions.append((self.on_trigger_start if self.is_active else self.on_trigger_stop, ()))
+                    elif self.mode == "hold" and self.is_active:
+                        self.is_active = False
+                        actions.append((self.on_trigger_stop, ()))
+                    self._toggle_armed = False
 
-            # Suppress Win while entering, holding, or leaving the PTT chord.
-            accept = name not in self.WIN_NAMES or not (was_active or self.is_active)
+            if name == "win":
+                # If Win went down first, Windows saw it. Release it with a
+                # Ctrl wrapper after the chord so Start doesn't open.
+                if self.shortcut == DEFAULT_SHORTCUT and not self.paused and (previous or self._chord_down):
+                    if not consume and (not down or repeat):
+                        self._win_needs_release = True
+                    consume = True
+                elif down and not consume:
+                    self._win_needs_release = False
+            if self.shortcut == DEFAULT_SHORTCUT and self._chord_down and not previous and name == "ctrl":
+                self._win_needs_release |= any(
+                    pressed_name == "win" and pressed_key not in self._suppressed
+                    for pressed_key, pressed_name in self._pressed.items()
+                )
+            if self._win_needs_release and previous and not self._chord_down:
+                self._win_needs_release = False
+                actions.append((self._restore_windows_key_state, ()))
+            if consume and down:
+                self._suppressed.add(key)
+            elif not down:
+                self._suppressed.discard(key)
 
-        # A physical Win key-up may already be waiting for the lock on the
-        # Windows hook thread. Let that callback return before injecting keys.
-        if restore_windows_keys:
-            self._restore_windows_key_state()
-        return accept
+        for callback, args in actions:
+            self._schedule(callback, *args)
+        return not consume
 
-    @staticmethod
-    def _update_pressed_keys(pressed_keys, event):
-        # Name plus scan code distinguishes left/right modifiers where the
-        # library exposes both, while still working with generic names.
-        key_id = (event.name, getattr(event, "scan_code", None))
-        if event.event_type == "down":
-            pressed_keys.add(key_id)
-        elif event.event_type == "up":
-            pressed_keys.discard(key_id)
-
-    def _reset_key_state(self):
-        self._pressed_ctrl_keys.clear()
-        self._pressed_win_keys.clear()
-
-    def _block_win_keys(self):
-        """Mark Win events for suppression by the permanent blocking hook."""
-        if self.win_blocked:
+    def _schedule(self, callback, *args):
+        if callback is None:
             return
+        actions = self._actions
+        if actions is None:
+            self._invoke(callback, args)
+        else:
+            actions.put((callback, args))
 
-        logger.info("Suppressing Windows-key events for the active PTT chord.")
-        self.win_blocked = True
+    def _run_actions(self, actions):
+        while (action := actions.get()) is not None:
+            self._invoke(*action)
 
-    def _unblock_win_keys(self):
-        """Restore Windows keys and release their suppressed OS state."""
-        with self._state_lock:
-            restore_windows_keys = self._end_win_suppression()
-        if restore_windows_keys:
-            self._restore_windows_key_state()
-
-    def _end_win_suppression(self):
-        was_blocked = self.win_blocked
-        self.win_blocked = False
-        return was_blocked
+    def _invoke(self, callback, args):
+        try:
+            result = callback(*args)
+            if callback is self.on_trigger_start and result is False:
+                self.cancel_active()
+        except Exception:
+            logger.exception("Dictate shortcut failed")
 
     def _restore_windows_key_state(self):
-        logger.info("Ending Windows-key event suppression.")
-        started = perf_counter()
-        try:
-            keyboard.press("ctrl")
-            keyboard.release("left windows")
-            keyboard.release("right windows")
-            keyboard.release("ctrl")
-            logger.debug("Sent Win key release events wrapped in Ctrl in %.3fs.", perf_counter() - started)
-        except Exception as e:
-            logger.error(f"Failed to unblock Windows keys: {e}")
+        # keyboard.send suppresses replayed events from the hook. Leave a
+        # physically held Ctrl alone so other shortcuts continue to work.
+        with self._state_lock:
+            ctrl_held = "ctrl" in self._pressed.values()
+        if ctrl_held:
+            keyboard.send("left windows+right windows", do_press=False)
+        else:
+            keyboard.send("ctrl", do_release=False)
+            keyboard.send("ctrl+left windows+right windows", do_press=False)

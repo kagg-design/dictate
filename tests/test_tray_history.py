@@ -8,10 +8,11 @@ from unittest.mock import Mock, patch
 import numpy as np
 import yaml
 
-from src.config import save_recognition_model
+from src.config import save_recognition_model, save_settings
 from src.history import DictationHistory
 from src.live_transcription import CompletedCapture
 from src.recorder import AudioRecorder
+from src.replacements import TextReplacements
 from src.tray import REFRESH_HISTORY_MENU, SystemTrayApp
 
 
@@ -37,7 +38,7 @@ class TrayHistoryTests(unittest.TestCase):
 
         delivered = []
 
-        def insert(text):
+        def insert(text, *, use_cursor_context):
             persisted = json.loads(self.path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["entries"][-1]["text"], text)
             delivered.append(text)
@@ -71,6 +72,15 @@ class TrayHistoryTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertFalse(items[0].enabled)
 
+    def test_copy_latest_uses_the_newest_text_on_each_call(self):
+        with patch("src.tray.copy_text") as copy:
+            self.app.copy_latest()
+            copy.assert_not_called()
+            self.history.add("old")
+            self.history.add("most recent")
+            self.app.copy_latest()
+        copy.assert_called_once_with("most recent", 123)
+
     def test_left_click_opens_the_desktop_window(self):
         open_window = Mock()
         with patch("src.tray.pystray.Icon"):
@@ -86,14 +96,14 @@ class TrayHistoryTests(unittest.TestCase):
         self.app.recorder.sample_rate = 16000
         self.app._pending_captures = 1
 
-        def insert(text):
+        def insert(text, *, use_cursor_context):
             entry, = self.history.recent()
             self.assertEqual(entry.text, text)
             self.assertIsNone(self.history.audio_path(entry))
 
         with patch("src.tray.paste_text", side_effect=insert) as paste:
             self.app._deliver_transcript(CompletedCapture(capture, pcm, save_wav=True))
-        paste.assert_called_once_with("dictated text")
+        paste.assert_called_once_with("dictated text", use_cursor_context=True)
         self.assertIsNotNone(self.history.audio_path(self.history.recent()[0]))
 
     def test_history_menu_refresh_is_performed_by_the_ui_queue(self):
@@ -147,7 +157,7 @@ class TrayHistoryTests(unittest.TestCase):
                 finish_first_decode.set()
                 worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
-            insert.assert_called_once_with("Beginning. Ending.")
+            insert.assert_called_once_with("Beginning. Ending.", use_cursor_context=True)
 
         self.assertEqual(len(decoded), 2)
         self.assertEqual(len(decoded[0]), 23200)
@@ -156,6 +166,38 @@ class TrayHistoryTests(unittest.TestCase):
             np.concatenate(decoded, axis=0),
             np.concatenate((pre_roll, first_phrase, pause, final_phrase), axis=0),
         )
+
+    def test_canceled_dictation_is_saved_without_insertion(self):
+        capture = Mock()
+        capture.finish.return_value = "keep this"
+        self.app._pending_captures = 1
+        with patch("src.tray.paste_text") as paste:
+            self.app._deliver_transcript(CompletedCapture(capture, np.zeros(8), insert=False))
+        self.assertEqual(self.history.recent()[0].text, "keep this")
+        paste.assert_not_called()
+
+    def test_replacements_apply_before_history_and_insertion_in_one_pass(self):
+        self.app.replacements = TextReplacements.from_config({
+            "флюид": "Fluid", "флюид войс": "FluidVoice", "FluidVoice": "Fluid Voice Inc.",
+        })
+        self.transcriber.transcribe.return_value = "Флюид Войс, флюидный, флюид."
+        with patch("src.tray.paste_text") as paste:
+            self.app._deliver_transcript("audio")
+        expected = "FluidVoice, флюидный, Fluid."
+        self.assertEqual(self.history.recent()[0].text, expected)
+        paste.assert_called_once_with(expected, use_cursor_context=True)
+
+    def test_replacement_edits_persist_and_reject_duplicates(self):
+        path = self.path.with_name("config.yaml")
+        with patch("src.tray.save_settings", side_effect=lambda settings: save_settings(settings, path)):
+            dictionary = self.app.replacements.update("ДиКтейт", "Dictate")
+            with self.assertRaises(ValueError):
+                dictionary.update("диктейт", "something")
+            self.app.set_replacements(dictionary.update("диктейт", "Dictate App", previous="ДиКтейт"))
+            restored = TextReplacements.from_config(yaml.safe_load(path.read_text(encoding="utf-8"))["text_replacements"])
+            self.assertEqual(restored.apply("Диктейт!"), "Dictate App!")
+            self.app.set_replacements(restored.remove("диктейт"))
+        self.assertEqual(yaml.safe_load(path.read_text(encoding="utf-8"))["text_replacements"], {})
 
     def test_model_switch_is_persisted_only_after_successful_load(self):
         config = self.path.with_name("config.yaml")

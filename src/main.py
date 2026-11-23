@@ -267,7 +267,7 @@ def main():
 
     def on_trigger_start():
         try:
-            tray_app.start_capture(
+            return tray_app.start_capture(
                 on_limit_reached=on_limit_reached,
                 on_audio_start=on_audio_start,
             )
@@ -278,20 +278,28 @@ def main():
                 "Recording Error", 
                 f"Failed to start audio stream: {str(e)}"
             )
+            return False
 
     def on_trigger_stop():
         tray_app.finish_capture()
         desktop.set_recording(False)
 
+    def on_trigger_cancel(keep_in_history):
+        tray_app.finish_capture(insert=False, keep_in_history=keep_in_history)
+        desktop.set_recording(False)
+
     def on_limit_reached():
         logger.info("Recording safety hard cap reached. Forcing stop.")
         desktop.set_recording(False)
-        # Reset the hotkey state and unblock Win even though the user may still
-        # be holding the chord when the safety limit fires.
+        # Disarm the recording while tracking any keys still physically held.
         hotkey_manager.cancel_active()
 
     # 4. Instantiate hotkey manager
-    hotkey_manager = HotkeyManager(on_trigger_start, on_trigger_stop)
+    hotkey_manager = HotkeyManager(
+        on_trigger_start, on_trigger_stop, on_cancel=on_trigger_cancel,
+        on_copy=lambda: tray_app.copy_latest(),
+        shortcut=config["hotkey"], mode=config["hotkey_mode"], escape_cancels=config["escape_cancels"],
+    )
 
     # 5. Define app cleanup callback
     def on_exit():
@@ -318,12 +326,11 @@ def main():
         models=models,
         open_window=desktop.show,
         save_wav=config["save_wav"] is True,
+        live_preview=config["live_preview"] is True,
+        use_cursor_context=config["use_cursor_context"] is not False,
+        text_replacements=config["text_replacements"],
     )
-    desktop.start(
-        tray_app,
-        show_overlay=config.get("show_overlay_indicator", True),
-        appearance=config["appearance"],
-    )
+    desktop.start(tray_app, appearance=config["appearance"])
 
     def diagnostic_state():
         # Read Python-owned state only; do not call Tk or the audio/GPU drivers

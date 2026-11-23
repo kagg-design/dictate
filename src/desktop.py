@@ -23,8 +23,10 @@ from src.desktop_theme import (
     system_appearance,
 )
 from src.logger import logger
+from src.hotkey import MODES, SHORTCUTS
 from src.overlay import RecordingOverlay
 from src.recorder import list_microphones
+from src.startup import set_start_at_login, startup_shortcut
 
 
 SYSTEM_DEFAULT = "System default"
@@ -46,9 +48,9 @@ class DesktopApp:
         self._win32.CloseHandle.argtypes = (wintypes.HANDLE,)
         self._activation = self._win32.CreateEventW(None, False, False, r"Local\DictateOpenWindow")
 
-    def start(self, app, *, show_overlay=True, appearance="System"):
+    def start(self, app, *, appearance="System"):
         self.thread = threading.Thread(
-            target=self._run, args=(app, show_overlay, appearance), name="DesktopUI", daemon=True
+            target=self._run, args=(app, appearance), name="DesktopUI", daemon=True
         )
         self.thread.start()
 
@@ -69,14 +71,14 @@ class DesktopApp:
             self._win32.CloseHandle(self._activation)
             self._activation = None
 
-    def _run(self, app, show_overlay, appearance):
+    def _run(self, app, appearance):
         with bundled_inter():
             root = None
             try:
                 root = tk.Tk()
                 root.withdraw()
                 window = DictateWindow(root, app, appearance)
-                overlay = RecordingOverlay(root) if show_overlay else None
+                overlay = RecordingOverlay(root)
                 show_pending = False
 
                 def dispatch():
@@ -93,8 +95,9 @@ class DesktopApp:
                             return
                         if command == "show":
                             show_pending = True
-                        elif overlay:
+                        else:
                             overlay.set_recording(command)
+                    overlay.set_preview(app.preview_text)
                     if show_pending and not app.dictation_busy:
                         window.show()
                         show_pending = False
@@ -132,6 +135,11 @@ class DictateWindow:
         self._poll_timer = None
         self._status_snapshot = None
         self._settings_snapshot = None
+        try:
+            self._startup_path = startup_shortcut()
+        except Exception:
+            self._startup_path = None
+            logger.exception("Could not locate the Windows Startup folder")
         self._styles = DesktopStyles(self.window)
         self._appearance = appearance if appearance in APPEARANCES else "System"
         self._theme = self._resolve_theme()
@@ -210,7 +218,8 @@ class DictateWindow:
         ttk.Label(navigation, text="Theme", style="Shortcut.TLabel").pack(side="right")
         self.status = ttk.Label(navigation, style="Info.Badge.TLabel")
         self.status.pack(side="right", padx=(0, 16))
-        ttk.Label(navigation, text="Ctrl + Win", style="Shortcut.TLabel").pack(side="right", padx=(0, 4))
+        self.shortcut_summary = ttk.Label(navigation, style="Shortcut.TLabel")
+        self.shortcut_summary.pack(side="right", padx=(0, 4))
         ttk.Frame(self.window, style="Divider.TFrame", height=1).pack(fill="x")
 
         self.content = ttk.Frame(self.window, padding=(24, 22, 24, 24))
@@ -264,7 +273,7 @@ class DictateWindow:
         self.transcript = tk.Text(
             transcript, width=32, height=9, wrap="word", font=(self._styles.font, 11),
             relief="flat", bd=0, highlightthickness=0, padx=0, pady=6,
-            state="disabled",
+            state="disabled", exportselection=False,
         )
         self._style_transcript()
         scroll = ttk.Scrollbar(transcript, orient="vertical", command=self.transcript.yview)
@@ -278,6 +287,8 @@ class DictateWindow:
         self.copy_button.pack(side="left")
         self.audio_button = ttk.Button(actions, text="Play audio", command=self._toggle_audio, state="disabled")
         self.audio_button.pack(side="left", padx=(8, 0))
+        self.replacement_button = ttk.Button(actions, text="Add replacement…", command=self._add_history_replacement)
+        self.replacement_button.pack(side="left", padx=(8, 0))
         self.history_feedback = ttk.Label(details, style="PanelMuted.TLabel", wraplength=350)
         self.history_feedback.pack(anchor="w", pady=(7, 0))
         self.search.trace_add("write", lambda *_: self._refresh_history())
@@ -296,7 +307,12 @@ class DictateWindow:
         page.bind("<Configure>", lambda event: body.place_configure(width=min(event.width, 768)))
         ttk.Label(body, text="Settings", style="Heading.TLabel").pack(anchor="w", pady=(0, 16))
 
-        shell, audio = self._panel(body)
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        right = ttk.Frame(body)
+        right.pack(side="right", fill="both", expand=True, padx=(6, 0))
+
+        shell, audio = self._panel(left)
         shell.pack(fill="x", pady=(0, 12))
         ttk.Label(audio, text="Microphone", style="Section.TLabel").pack(anchor="w")
         row = ttk.Frame(audio, style="Surface.TFrame")
@@ -310,22 +326,24 @@ class DictateWindow:
         level_row.pack(fill="x")
         self.level_label = ttk.Label(level_row, text="Input level", style="PanelMuted.TLabel")
         self.level_label.pack(side="left", padx=(0, 10))
-        self.level = ttk.Progressbar(level_row, style="Input.Horizontal.TProgressbar", maximum=100, length=180)
+        self.level = ttk.Progressbar(level_row, style="Input.Horizontal.TProgressbar", maximum=100, length=125)
         self.level.pack(side="left")
-        self.pre_roll = ttk.Combobox(level_row, state="readonly", width=9)
+        pre_roll_row = ttk.Frame(audio, style="Surface.TFrame")
+        pre_roll_row.pack(fill="x", pady=(8, 0))
+        self.pre_roll = ttk.Combobox(pre_roll_row, state="readonly", width=9)
         self.pre_roll.configure(postcommand=lambda: style_combobox_list(self.pre_roll, self.palette))
         self.pre_roll.pack(side="right")
         self.pre_roll.bind("<<ComboboxSelected>>", self._change_pre_roll)
-        ttk.Label(level_row, text="Microphone pre-roll", style="Surface.TLabel").pack(side="right", padx=(8, 10))
+        ttk.Label(pre_roll_row, text="Microphone pre-roll", style="Surface.TLabel").pack(side="left")
         ttk.Label(
             audio,
             text="At 0 ms the ring buffer is off and the mic opens only for dictation. With pre-roll enabled, "
                  "the mic stays open and Windows may show its mic icon continuously. Before dictation, Dictate "
                  "keeps only the selected length of recent audio in memory.",
-            style="PanelMuted.TLabel", wraplength=690,
+            style="PanelMuted.TLabel", wraplength=300,
         ).pack(anchor="w", pady=(7, 0))
 
-        shell, models = self._panel(body)
+        shell, models = self._panel(left)
         shell.pack(fill="x", pady=(0, 12))
         heading = ttk.Frame(models, style="Surface.TFrame")
         heading.pack(fill="x")
@@ -342,7 +360,28 @@ class DictateWindow:
             option.pack(anchor="w", pady=(3, 0))
             self._model_options.append(option)
 
-        shell, history = self._panel(body)
+        self.settings_notice = ttk.Label(left, wraplength=300)
+
+        shell, controls = self._panel(right)
+        shell.pack(fill="x", pady=(0, 12))
+        ttk.Label(controls, text="Dictation controls", style="Section.TLabel").pack(anchor="w")
+        self.shortcut_choice = self._settings_choice(controls, "Shortcut", SHORTCUTS.values())
+        self.mode_choice = self._settings_choice(controls, "Mode", MODES.values())
+        self.escape_cancels = tk.BooleanVar(self.window)
+        self.preview = tk.BooleanVar(self.window)
+        self.cursor_context = tk.BooleanVar(self.window)
+        self.dictation_options = [
+            ttk.Checkbutton(controls, text=label, variable=setting, command=self._save_dictation_preferences)
+            for label, setting in (
+                ("Esc cancels and keeps text in History", self.escape_cancels),
+                ("Show live transcript while dictating", self.preview),
+                ("Use text around the cursor", self.cursor_context),
+            )
+        ]
+        for option in self.dictation_options:
+            option.pack(anchor="w", pady=(4, 0))
+
+        shell, history = self._panel(right)
         shell.pack(fill="x")
         ttk.Label(history, text="History and audio", style="Section.TLabel").pack(anchor="w")
         self.save_audio = tk.BooleanVar(self.window)
@@ -353,10 +392,175 @@ class DictateWindow:
         self.wav_option.pack(anchor="w", pady=(8, 4))
         ttk.Label(
             history, text="Play back new recordings from History. Audio is kept with its transcript.",
-            style="PanelMuted.TLabel", wraplength=580,
+            style="PanelMuted.TLabel", wraplength=300,
         ).pack(anchor="w")
-        self.settings_notice = ttk.Label(body, wraplength=680)
+        self.start_at_login = tk.BooleanVar(self.window)
+        ttk.Checkbutton(
+            history, text="Start Dictate at login", variable=self.start_at_login,
+            command=self._toggle_start_at_login,
+            state="normal" if self._startup_path else "disabled",
+        ).pack(anchor="w", pady=(8, 0))
+        ttk.Button(history, text="Manage replacements…", command=self._manage_replacements).pack(anchor="w", pady=(8, 0))
         return page
+
+    def _add_history_replacement(self):
+        selection = self.transcript.tag_ranges("sel")
+        text = self.transcript.get(*selection).strip() if selection else ""
+        if not text:
+            self.history_feedback.configure(text="Select a word or phrase in the transcript first.")
+            return
+        existing = next((rule for rule in self.app.replacements.rules if rule[0].casefold() == text.casefold()), None)
+        if self._edit_replacement(self.window, existing=existing, source=text):
+            self.history_feedback.configure(text="Replacement saved for future dictations.")
+
+    def _manage_replacements(self):
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Text replacements")
+        dialog.transient(self.window)
+        dialog.geometry("580x340")
+        dialog.minsize(460, 280)
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        listing = ttk.Treeview(body, columns=("source", "replacement"), show="headings", selectmode="browse")
+        listing.heading("source", text="Recognized text")
+        listing.heading("replacement", text="Replacement")
+        listing.column("source", width=235, minwidth=125)
+        listing.column("replacement", width=235, minwidth=125)
+        scroll = ttk.Scrollbar(body, command=listing.yview)
+        listing.configure(yscrollcommand=scroll.set)
+        actions = ttk.Frame(body)
+        actions.pack(side="bottom", fill="x", pady=(10, 0))
+        scroll.pack(side="right", fill="y")
+        listing.pack(fill="both", expand=True)
+        status = ttk.Label(actions, style="Muted.TLabel", wraplength=230)
+        status.pack(side="right")
+
+        def selected_rule():
+            selected = listing.selection()
+            return self.app.replacements.rules[int(selected[0])] if selected else None
+
+        def sync():
+            for button in (edit, remove):
+                button.configure(state="normal" if listing.selection() else "disabled")
+
+        def refresh():
+            listing.delete(*listing.get_children())
+            for index, rule in enumerate(self.app.replacements.rules):
+                listing.insert("", "end", iid=str(index), values=rule)
+            sync()
+
+        def edit_rule(existing=None):
+            if self._edit_replacement(dialog, existing=existing):
+                status.configure(text="")
+                refresh()
+
+        def remove_rule():
+            rule = selected_rule()
+            if rule:
+                try:
+                    self.app.set_replacements(self.app.replacements.remove(rule[0]))
+                except (OSError, ValueError, yaml.YAMLError):
+                    logger.exception("Could not remove text replacement")
+                    status.configure(text="Could not remove this replacement.")
+                else:
+                    status.configure(text="")
+                    refresh()
+
+        ttk.Button(actions, text="Add…", command=edit_rule).pack(side="left")
+        edit = ttk.Button(actions, text="Edit…", command=lambda: edit_rule(selected_rule()))
+        edit.pack(side="left", padx=(8, 0))
+        remove = ttk.Button(actions, text="Remove", command=remove_rule)
+        remove.pack(side="left", padx=(8, 0))
+        listing.bind("<<TreeviewSelect>>", lambda event: sync())
+        listing.bind("<Double-1>", lambda event: edit_rule(selected_rule()) if listing.identify_row(event.y) else None)
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        refresh()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        dialog.wait_window()
+
+    def _edit_replacement(self, parent, *, existing=None, source=""):
+        dialog = tk.Toplevel(parent)
+        dialog.title("Edit replacement" if existing else "Add replacement")
+        dialog.transient(parent)
+        dialog.minsize(400, 200)
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        recognized, value = existing or (source, "")
+        inputs = []
+        for label, text in (("Recognized text", recognized), ("Replacement", value)):
+            ttk.Label(body, text=label).pack(anchor="w")
+            entry = ttk.Entry(body)
+            entry.insert(0, text)
+            entry.pack(fill="x", pady=(4, 10))
+            inputs.append(entry)
+        first, replacement = inputs
+        status = ttk.Label(body, style="Muted.TLabel", wraplength=360)
+        status.pack(anchor="w")
+        saved = False
+
+        def save(event=None):
+            nonlocal saved
+            try:
+                rules = self.app.replacements.update(
+                    first.get(), replacement.get(), previous=existing[0] if existing else None,
+                )
+                self.app.set_replacements(rules)
+            except ValueError as exc:
+                status.configure(text=str(exc))
+            except (OSError, yaml.YAMLError):
+                logger.exception("Could not save text replacement")
+                status.configure(text="Could not save this replacement.")
+            else:
+                saved = True
+                dialog.destroy()
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(buttons, text="Save", style="Action.TButton", command=save).pack(side="right")
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
+        dialog.bind("<Return>", save)
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        previous_grab = parent.grab_current()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        focus = replacement if recognized else first
+        focus.focus_set()
+        focus.selection_range(0, tk.END)
+        dialog.wait_window()
+        if previous_grab is not None and previous_grab.winfo_exists():
+            previous_grab.grab_set()
+        return saved
+
+    def _settings_choice(self, parent, label, values):
+        row = ttk.Frame(parent, style="Surface.TFrame")
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Label(row, text=label, style="Surface.TLabel").pack(side="left")
+        choice = ttk.Combobox(row, state="readonly", values=tuple(values), width=23)
+        choice.configure(postcommand=lambda: style_combobox_list(choice, self.palette))
+        choice.pack(side="right")
+        choice.bind("<<ComboboxSelected>>", self._save_dictation_preferences)
+        return choice
+
+    def _save_dictation_preferences(self, event=None):
+        self.app.set_dictation_preferences(
+            shortcut=tuple(SHORTCUTS)[self.shortcut_choice.current()],
+            mode=tuple(MODES)[self.mode_choice.current()],
+            escape_cancels=self.escape_cancels.get(),
+            live_preview=self.preview.get(),
+            use_cursor_context=self.cursor_context.get(),
+        )
+        self._refresh_settings(force=True)
+
+    def _toggle_start_at_login(self):
+        try:
+            set_start_at_login(self._startup_path, self.start_at_login.get())
+        except Exception as exc:
+            self.app.settings_error = f"Could not change startup settings. {exc}"
+            logger.exception("Could not update the Windows Startup shortcut")
+        else:
+            self.app.settings_error = ""
+        self._refresh_settings(force=True)
 
     def _select_page(self, name):
         self._page = name
@@ -407,6 +611,7 @@ class DictateWindow:
         self._poll_timer = self.window.after(170, self._poll)
 
     def _update_status(self):
+        self.shortcut_summary.configure(text=SHORTCUTS[self.app.hotkey_manager.shortcut])
         if self.app.is_paused:
             state, kind = "Dictation paused", "Warning"
         elif self.app.settings_activity:
@@ -461,7 +666,11 @@ class DictateWindow:
         if not notice and device == "CPU":
             notice, kind = "Whisper is running on the CPU. Dictation may take longer to appear, especially for longer recordings.", "Warning"
         pre_roll_ms = round(recorder.ring_buffer_duration * 1000)
-        snapshot = (busy, notice, kind, recorder.microphone, self.app.model_name, device, self.app.save_wav, pre_roll_ms)
+        hotkeys = self.app.hotkey_manager
+        snapshot = (
+            busy, notice, kind, recorder.microphone, self.app.model_name, device, self.app.save_wav, pre_roll_ms,
+            hotkeys.shortcut, hotkeys.mode, hotkeys.escape_cancels, self.app.live_preview, self.app.use_cursor_context,
+        )
         if not force and snapshot == self._settings_snapshot:
             return
         self._settings_snapshot = snapshot
@@ -477,6 +686,16 @@ class DictateWindow:
         for option in [*self._model_options, self.wav_option]:
             option.configure(state="disabled" if busy else "normal")
         self.save_audio.set(self.app.save_wav)
+        for choice in (self.shortcut_choice, self.mode_choice):
+            choice.configure(state="disabled" if busy else "readonly")
+        self.shortcut_choice.set(SHORTCUTS[hotkeys.shortcut])
+        self.mode_choice.set(MODES[hotkeys.mode])
+        for option in self.dictation_options:
+            option.configure(state="disabled" if busy else "normal")
+        self.escape_cancels.set(hotkeys.escape_cancels)
+        self.preview.set(self.app.live_preview)
+        self.cursor_context.set(self.app.use_cursor_context)
+        self.start_at_login.set(bool(self._startup_path and self._startup_path.is_file()))
         if notice:
             self.settings_notice.configure(text=notice, style=f"{kind}.Notice.TLabel")
             self.settings_notice.pack(fill="x", pady=(10, 0))
@@ -525,6 +744,7 @@ class DictateWindow:
             self.details_title.configure(text="No matches" if self.search.get().strip() else "No dictations yet")
             self.details_model.configure(text="")
         self.copy_button.configure(state="normal" if entry else "disabled")
+        self.replacement_button.configure(state="normal" if entry else "disabled")
         can_play = bool(entry and self.app.history.audio_path(entry))
         self.audio_button.configure(state="normal" if can_play else "disabled")
         self.history_feedback.configure(text="")

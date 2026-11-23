@@ -44,6 +44,7 @@ Type: filesandordirs; Name: "{app}\runtime"; Check: HasExistingInstallation
 Filename: "{app}\runtime\pythonw.exe"; Parameters: "-E -s -B -m src.main --show"; WorkingDir: "{app}"; Description: "Open Dictate"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
+Type: files; Name: "{userstartup}\KAGG Dictate.lnk"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\cuda"
 

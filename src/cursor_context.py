@@ -31,6 +31,7 @@ class CursorContext:
 
 
 def format_for_cursor(text, context):
+    text = text.lstrip(" \t")
     if not text:
         return text
     if context is None:
@@ -141,7 +142,7 @@ def _read_focused_selection(automation, uia):
     end = uia.TextPatternRangeEndpoint_End
     before = selection.Clone()
     before.MoveEndpointByRange(end, selection, start)
-    before.MoveEndpointByUnit(start, uia.TextUnit_Character, -CONTEXT_CHARACTERS)
+    left_count = before.MoveEndpointByUnit(start, uia.TextUnit_Character, -CONTEXT_CHARACTERS)
     after = selection.Clone()
     after.MoveEndpointByRange(start, selection, end)
     after.MoveEndpointByUnit(end, uia.TextUnit_Character, CONTEXT_CHARACTERS)
@@ -149,7 +150,7 @@ def _read_focused_selection(automation, uia):
     # A provider can count graphemes rather than UTF-16 units. Reject ranges
     # that exceed this budget so a truncated prefix can't be used at the caret.
     text_limit = 2 * CONTEXT_CHARACTERS
-    left_text = before.GetText(text_limit) or ""
+    left_text = (before.GetText(text_limit) or "") if left_count else ""
     right_text = after.GetText(text_limit) or ""
     if max(len(left_text), len(right_text)) >= text_limit:
         return None
