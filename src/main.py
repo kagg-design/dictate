@@ -285,7 +285,7 @@ def main():
 
     def on_limit_reached():
         logger.info("Recording safety hard cap reached. Forcing stop.")
-        on_trigger_stop()
+        desktop.set_recording(False)
         # Reset the hotkey state and unblock Win even though the user may still
         # be holding the chord when the safety limit fires.
         hotkey_manager.cancel_active()

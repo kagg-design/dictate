@@ -1,0 +1,23 @@
+# Dictate for macOS beta
+
+Requires macOS 15 or later on an Apple Silicon Mac. Open the disk image and drag **Dictate** into **Applications**. Start Dictate and choose **Open Dictate** from its waveform icon in the menu bar.
+
+This beta uses an ad hoc signature. If macOS asks you to confirm the app from this download, use Apple's [first-launch instructions](https://support.apple.com/en-us/102445).
+
+In Dictate settings, allow **Microphone**, **Input Monitoring**, and **Accessibility**. After granting Input Monitoring, choose **Quit Dictate** from the menu bar and reopen it from **Applications**. Wait for **Ready to dictate**. In a TextEdit document, hold **Control + Option**, speak, then release. Dictate stores the result in **History** if the target window or field changes before insertion.
+
+**Fluid Speech Mini** uses Core ML and **Whisper Large v3 Turbo** uses Metal. Each downloads its model on first selection and then runs locally. Fluid Speech Mini is provided by FluidVoice. **0 ms pre-roll** keeps the microphone closed between dictations. Positive pre-roll keeps the microphone open and holds only the selected length of recent sound in memory until dictation starts.
+
+The beta uses the current macOS default microphone and decodes completed phrases as you speak. A long uninterrupted phrase is finalized on release.
+
+## Build
+
+On an Apple Silicon Mac with Xcode 26 or newer selected and CMake on PATH, run these commands.
+
+```bash
+git clone https://github.com/kagg-design/dictate.git
+cd dictate
+bash macos/build.sh
+```
+
+The build runs tests, signs the app ad hoc, and writes `Dictate-macOS-arm64-beta.dmg` and its SHA-256 file to `artifacts/macos/`. Set `DICTATE_SMOKE_AUDIO` to a local 16 kHz mono WAV to run both packaged models before creating the image. Set `DICTATE_SMOKE_EXPECTED` to check the decoded phrase.

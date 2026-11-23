@@ -25,6 +25,11 @@ class MicrophoneSelection:
     microphone: str | None
 
 
+@dataclass(frozen=True)
+class PreRollSelection:
+    duration: float
+
+
 class SystemTrayApp:
     def __init__(
         self, transcriber, recorder, hotkey_manager, on_exit_callback,
@@ -52,6 +57,7 @@ class SystemTrayApp:
         self._pending_captures = 0
         self._loading_model = False
         self._changing_microphone = False
+        self._changing_pre_roll = False
         self.settings_error = ""
         self.save_wav = save_wav
         
@@ -96,7 +102,7 @@ class SystemTrayApp:
 
     @property
     def settings_busy(self):
-        return bool(self._loading_model or self._changing_microphone or self.dictation_busy)
+        return bool(self.settings_activity or self.dictation_busy)
 
     @property
     def dictation_busy(self):
@@ -108,6 +114,8 @@ class SystemTrayApp:
             return "Loading speech model…"
         if self._changing_microphone:
             return "Switching microphone…"
+        if self._changing_pre_roll:
+            return "Updating microphone pre-roll…"
         return ""
 
     def select_model(self, model, *, persist=True):
@@ -150,7 +158,7 @@ class SystemTrayApp:
         with self._capture_lock:
             if not self.running or self.settings_busy:
                 return
-            if microphone == self.recorder.microphone and self.recorder.stream:
+            if microphone == self.recorder.microphone and self.recorder.microphone_ready:
                 return
             self.settings_error = ""
             self._changing_microphone = True
@@ -168,6 +176,27 @@ class SystemTrayApp:
         finally:
             with self._capture_lock:
                 self._changing_microphone = False
+
+    def select_pre_roll(self, duration):
+        with self._capture_lock:
+            if not self.running or self.settings_busy or duration == self.recorder.ring_buffer_duration:
+                return
+            self.settings_error = ""
+            self._changing_pre_roll = True
+            self.task_queue.put(PreRollSelection(duration))
+
+    def _change_pre_roll(self, selection):
+        try:
+            self.recorder.set_pre_roll(
+                selection.duration,
+                persist=lambda: save_settings({"ring_buffer_duration": selection.duration}),
+            )
+        except Exception as exc:
+            self.settings_error = f"Could not change microphone pre-roll. {exc}"
+            logger.exception("Failed to change microphone pre-roll")
+        finally:
+            with self._capture_lock:
+                self._changing_pre_roll = False
 
     def set_save_wav(self, enabled):
         try:
@@ -190,7 +219,7 @@ class SystemTrayApp:
         with self._capture_lock:
             if not self.running or self._capture:
                 return
-            if self._loading_model or self._changing_microphone or self.transcriber is None:
+            if self.settings_activity or self.transcriber is None:
                 message = (
                     self.settings_activity or "Select a speech model in Dictate Settings."
                 )
@@ -202,27 +231,38 @@ class SystemTrayApp:
             )
 
             def show_recording():
-                with self._capture_lock:
+                # PortAudio must be able to finish its callback while stop()
+                # closes an on-demand stream under the capture lock.
+                if not self._capture_lock.acquire(blocking=False):
+                    return False
+                try:
                     if self._capture is capture:
                         on_audio_start()
+                finally:
+                    self._capture_lock.release()
 
-            self.recorder.start(on_limit_reached=on_limit_reached, on_audio_start=show_recording)
+            def finish_at_limit():
+                if self.finish_capture(expected=capture):
+                    on_limit_reached()
+
+            self.recorder.start(on_limit_reached=finish_at_limit, on_audio_start=show_recording)
             self._capture = capture
 
-    def finish_capture(self):
+    def finish_capture(self, *, expected=None):
         with self._capture_lock:
-            if self._capture is None:
-                return
+            if self._capture is None or (expected is not None and self._capture is not expected):
+                return False
             capture, self._capture = self._capture, None
             audio = self.recorder.stop()
             if self.recorder.capture_interrupted is True:
                 self.show_notification("Microphone Interrupted", "Part of this dictation may be missing.")
             if audio is None:
                 self._restore_tray_state()
-                return
-            self._pending_captures += 1
-            self.set_state("transcribing")
-            self.task_queue.put(CompletedCapture(capture, audio, self.save_wav))
+            else:
+                self._pending_captures += 1
+                self.set_state("transcribing")
+                self.task_queue.put(CompletedCapture(capture, audio, self.save_wav))
+            return True
 
     def _process_live_audio(self):
         with self._capture_lock:
@@ -411,6 +451,8 @@ class SystemTrayApp:
                         self._load_model(task)
                     elif isinstance(task, MicrophoneSelection):
                         self._change_microphone(task)
+                    elif isinstance(task, PreRollSelection):
+                        self._change_pre_roll(task)
                     else:
                         self._deliver_transcript(task)
                 finally:

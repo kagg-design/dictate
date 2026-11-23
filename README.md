@@ -1,6 +1,10 @@
-# Dictate: Local Push-to-Talk Dictation for Windows
+# Dictate: Local Push-to-Talk Dictation
 
-A Windows dictation app that runs Fluid Speech Mini or Whisper locally and inserts the final text into the focused window when you release the hotkey.
+A Windows and macOS dictation app that runs Fluid Speech Mini or Whisper locally and inserts the final text into the focused window when you release the hotkey.
+
+## Build on Mac
+
+The macOS beta runs on Apple Silicon with macOS 15 or later. With Xcode 26 or newer selected and CMake available, clone this repository and run `bash macos/build.sh`. The build writes `Dictate-macOS-arm64-beta.dmg` and its SHA-256 file to `artifacts/macos/`. See the [macOS build and setup guide](macos/README.md).
 
 ## Install on Windows
 
@@ -99,7 +103,9 @@ Open **Settings** to choose a microphone and select Whisper or Fluid Speech Mini
 
 Fluid Speech Mini uses the model and CUDA runtime already installed by FluidVoice. Install FluidVoice for Windows and enable Mini there once to make those files available. For a separate installation of the same runtime and model, set `fluid_mini_dll` and `fluid_mini_model` in `config.yaml`.
 
-Dictate uses the microphone's pre-roll at the start of each recording. During recording, Fluid Speech Mini processes overlapping audio windows, including continuous speech. Whisper processes completed phrases at pauses. Dictate assembles the final dictation and inserts it once when you release the hotkey.
+Set **Microphone pre-roll** in Settings to keep a short amount of sound from before you pressed the hotkey. With pre-roll enabled, the microphone stays open and Windows may show its microphone icon continuously. Before dictation, only the selected interval of recent audio is held in memory. At **0 ms** the ring buffer is off and the microphone opens only during dictation.
+
+During recording, Fluid Speech Mini processes overlapping audio windows, including continuous speech. Whisper processes completed phrases at pauses. Dictate assembles the final dictation and inserts it once when you release the hotkey.
 
 ## Adding to Windows Startup
 

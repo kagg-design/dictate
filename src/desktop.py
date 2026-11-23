@@ -28,6 +28,7 @@ from src.recorder import list_microphones
 
 
 SYSTEM_DEFAULT = "System default"
+PRE_ROLL_MS = (0, 250, 500, 1000)
 ICON = Path(__file__).resolve().parents[1] / "icon.ico"
 
 
@@ -118,7 +119,7 @@ class DictateWindow:
         if ICON.is_file():
             self.window.iconbitmap(str(ICON))
         self.window.geometry("1080x690")
-        self.window.minsize(850, 600)
+        self.window.minsize(850, 640)
         self.window.protocol("WM_DELETE_WINDOW", self.hide)
         self.window.bind("<Escape>", lambda event: self.hide())
         self.window.bind("<Control-f>", self._focus_search)
@@ -307,9 +308,22 @@ class DictateWindow:
         ttk.Button(row, text="Refresh", command=self._refresh_microphones).pack(side="right", padx=(8, 0))
         level_row = ttk.Frame(audio, style="Surface.TFrame")
         level_row.pack(fill="x")
-        ttk.Label(level_row, text="Input level", style="PanelMuted.TLabel").pack(side="left", padx=(0, 10))
+        self.level_label = ttk.Label(level_row, text="Input level", style="PanelMuted.TLabel")
+        self.level_label.pack(side="left", padx=(0, 10))
         self.level = ttk.Progressbar(level_row, style="Input.Horizontal.TProgressbar", maximum=100, length=180)
         self.level.pack(side="left")
+        self.pre_roll = ttk.Combobox(level_row, state="readonly", width=9)
+        self.pre_roll.configure(postcommand=lambda: style_combobox_list(self.pre_roll, self.palette))
+        self.pre_roll.pack(side="right")
+        self.pre_roll.bind("<<ComboboxSelected>>", self._change_pre_roll)
+        ttk.Label(level_row, text="Microphone pre-roll", style="Surface.TLabel").pack(side="right", padx=(8, 10))
+        ttk.Label(
+            audio,
+            text="At 0 ms the ring buffer is off and the mic opens only for dictation. With pre-roll enabled, "
+                 "the mic stays open and Windows may show its mic icon continuously. Before dictation, Dictate "
+                 "keeps only the selected length of recent audio in memory.",
+            style="PanelMuted.TLabel", wraplength=690,
+        ).pack(anchor="w", pady=(7, 0))
 
         shell, models = self._panel(body)
         shell.pack(fill="x", pady=(0, 12))
@@ -401,7 +415,7 @@ class DictateWindow:
             state, kind = "Recording", "Danger"
         elif self.app.state == "transcribing":
             state, kind = "Finishing dictation", "Info"
-        elif self.app.transcriber is None or self.app.recorder.stream is None:
+        elif self.app.transcriber is None or not self.app.recorder.microphone_ready:
             state, kind = "Setup needed", "Warning"
         elif self.app.transcriber.device == "cpu":
             state, kind = "Ready · CPU mode", "Warning"
@@ -428,10 +442,16 @@ class DictateWindow:
         self.app.select_microphone(None if name == SYSTEM_DEFAULT else name)
         self._refresh_settings(force=True)
 
+    def _change_pre_roll(self, event=None):
+        milliseconds = int(self.pre_roll.get().removesuffix(" ms"))
+        self.app.select_pre_roll(milliseconds / 1000)
+        self._refresh_settings(force=True)
+
     def _refresh_settings(self, *, force=False):
-        self.level.configure(value=min(100, 155 * self.app.recorder.microphone_level() ** 0.6))
+        recorder = self.app.recorder
+        self.level.configure(value=min(100, 155 * recorder.microphone_level() ** 0.6))
         busy = self.app.settings_busy
-        notice, kind = self.app.recorder.input_issue, "Warning"
+        notice, kind = recorder.input_issue, "Warning"
         if self.app.settings_activity:
             notice, kind = self.app.settings_activity, "Info"
         elif self.app.settings_error:
@@ -440,13 +460,18 @@ class DictateWindow:
         device = engine.device.upper() if engine else ""
         if not notice and device == "CPU":
             notice, kind = "Whisper is running on the CPU. Dictation may take longer to appear, especially for longer recordings.", "Warning"
-        snapshot = (busy, notice, kind, self.app.recorder.microphone, self.app.model_name, device, self.app.save_wav)
+        pre_roll_ms = round(recorder.ring_buffer_duration * 1000)
+        snapshot = (busy, notice, kind, recorder.microphone, self.app.model_name, device, self.app.save_wav, pre_roll_ms)
         if not force and snapshot == self._settings_snapshot:
             return
         self._settings_snapshot = snapshot
 
         self.microphone.configure(state="disabled" if busy else "readonly")
-        self.microphone.set(self.app.recorder.microphone or SYSTEM_DEFAULT)
+        self.microphone.set(recorder.microphone or SYSTEM_DEFAULT)
+        choices = sorted(set(PRE_ROLL_MS) | {pre_roll_ms})
+        self.pre_roll.configure(state="disabled" if busy else "readonly", values=[f"{value} ms" for value in choices])
+        self.pre_roll.set(f"{pre_roll_ms} ms")
+        self.level_label.configure(text="Input level" if pre_roll_ms else "Input level (while dictating)")
         self.model.set(self.app.model_name or "")
         self.backend.configure(text=device)
         for option in [*self._model_options, self.wav_option]:

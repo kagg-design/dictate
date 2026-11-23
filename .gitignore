@@ -31,3 +31,8 @@ crash_log.txt
 artifacts/windows/
 artifacts/windows-build/
 
+# macOS distribution build products
+artifacts/macos/
+artifacts/macos-build/
+macos/.build/
+
