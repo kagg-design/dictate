@@ -8,7 +8,7 @@ The macOS beta runs on Apple Silicon with macOS 15 or later. With Xcode 26 or ne
 
 ## Install on Windows
 
-1. Open [GitHub Releases](https://github.com/kagg-design/dictate/releases) and download `Dictate-Setup-x64.exe` from the release's **Assets**. The installer is for Windows 10 and 11 on x64 PCs and includes its own Python and Inter font.
+1. Open [GitHub Releases](https://github.com/kagg-design/dictate/releases) and download `Dictate-Setup-x64.exe` from the release's **Assets**. The installer is for Windows 10 and 11 on x64 PCs and includes its own Python runtime.
 2. Run Setup. If you have an NVIDIA GPU, keep **Download NVIDIA libraries for GPU acceleration** selected. This downloads about 1.3 GB and uses your existing NVIDIA driver. Setup warns when it expects to run without GPU acceleration and lets you continue in the slower CPU mode or cancel. Dictate shows **CPU mode** whenever Whisper is using the processor.
 3. Open **Dictate** from the Start menu. Give it time to download the Whisper model on first launch. After the model is ready, hold `Ctrl+Win` while you speak and release it to insert the text.
 
@@ -108,6 +108,8 @@ Set **Microphone pre-roll** in Settings to keep a short amount of sound from bef
 During recording, Fluid Speech Mini processes overlapping audio windows, including continuous speech. Whisper processes completed phrases at pauses. Dictate assembles the final dictation and inserts it once when you release the hotkey.
 
 In **Settings**, choose a dictation shortcut and **Hold to dictate** or **Press to start / stop**. With the default `Ctrl+Win` in press-to-toggle mode, release the keys to start or stop. **Copy Last Dictation** in the tray and `Ctrl+Win+V` both copy the most recent transcript.
+
+Choose **Insert Last Dictation** in the tray or press `Ctrl+Alt+F9` to insert the most recent transcript into the focused editor without using the clipboard. Under **Settings → Dictation controls**, click either shortcut and hold two or three keys together to record it. Use modifiers alone or add one other key. You can turn off the insert shortcut and still use the menu.
 
 When **Esc cancels and keeps text in History** is enabled, `Esc` ends the recording and saves any recognized text without inserting it. **Show live transcript while dictating** is off by default. **Use text around the cursor** adjusts the inserted text to fit the field when its content is available.
 

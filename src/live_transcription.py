@@ -1,11 +1,20 @@
 """Recognize audio while the recorder continues to collect it."""
 
 from dataclasses import dataclass
+import re
 
 from faster_whisper.vad import get_speech_timestamps
 import numpy as np
 
 from src.logger import logger
+
+
+def _words(text):
+    return re.findall(r"[^\W_]+", text.casefold())
+
+
+def _contains_words(words, phrase):
+    return any(words[i:i + len(phrase)] == phrase for i in range(len(words) - len(phrase) + 1))
 
 
 @dataclass
@@ -19,7 +28,7 @@ class CompletedCapture:
 class LiveTranscription:
     """Keep one ordered text result and an audio offset for the active capture."""
 
-    def __init__(self, sample_rate, *, rolling=False):
+    def __init__(self, sample_rate, *, rolling=False, show_preview=False):
         self.sample_rate = sample_rate
         self.blocks_seen = 0
         self._pending = []
@@ -30,8 +39,13 @@ class LiveTranscription:
         self._parts = []
         self._failed = False
         self._rolling = RollingTranscription(sample_rate) if rolling else None
+        self._whisper_preview = show_preview and not rolling and sample_rate == 16000
+        self._draft = ""
+        self._draft_opening = []
+        self._next_preview = int(1.5 * sample_rate)
+        self._preview_speech_end = 0
 
-    def feed(self, blocks, transcriber):
+    def feed(self, blocks, transcriber, *, preview_active=None):
         self.blocks_seen += len(blocks)
         if not blocks or self._failed:
             return
@@ -42,28 +56,33 @@ class LiveTranscription:
         new_samples = self._samples_seen - self._last_inspection
         try:
             cut = None
+            speech_end = None
             if self.sample_rate == 16000 and pending_samples >= 20000 and new_samples >= 4000:
                 self._last_inspection = self._samples_seen
-                cut = self._find_pause(pending_samples, max(64000, new_samples + 32000))
+                cut, speech_end = self._find_pause(pending_samples, max(64000, new_samples + 32000))
             if cut is None or cut == self._empty_cut:
                 if self._rolling is not None:
                     self._rolling.feed(blocks, transcriber, self._pending_audio)
+                elif self._whisper_preview and speech_end is not None:
+                    self._update_draft(transcriber, self._processed + speech_end, preview_active)
                 return
 
             pending = self._pending_audio()
-            text = transcriber.transcribe_chunk(pending[:cut]).strip()
-            if self._rolling is not None and not text:
-                # A pause can follow speech that Mini missed on this pass. Keep
-                # the audio available to the next window and the final decode.
+            text = self._decode_chunk(pending[:cut], transcriber).strip()
+            if not text:
+                # A pause does not guarantee that the preceding speech was decoded.
                 self._empty_cut = cut
-                self._rolling.feed(blocks, transcriber, self._pending_audio)
+                if self._rolling is not None:
+                    self._rolling.feed(blocks, transcriber, self._pending_audio)
                 return
-            if text:
-                self._parts.append(text)
+            self._parts.append(text)
             tail = pending[cut:]
             self._pending = [tail.copy()] if len(tail) else []
             self._processed += cut
             self._empty_cut = None
+            self._draft = ""
+            self._draft_opening = []
+            self._preview_speech_end = self._processed
             if self._rolling is not None:
                 self._rolling = RollingTranscription(self.sample_rate)
                 self._rolling.feed(self._pending, transcriber, self._pending_audio)
@@ -77,14 +96,54 @@ class LiveTranscription:
         return np.concatenate(self._pending, axis=0)
 
     def preview(self):
-        parts = self._parts
-        if self._rolling is not None:
-            tail = self._rolling.preview()
-            if tail:
-                parts = [*parts, tail]
+        tail = self._rolling.preview() if self._rolling is not None else self._draft
+        parts = [*self._parts, tail] if tail else self._parts
         return " ".join(parts)[-180:].lstrip()
 
-    def _find_pause(self, pending_samples, window_size):
+    def _update_draft(self, transcriber, speech_end, preview_active):
+        if self._samples_seen < self._next_preview or speech_end <= self._preview_speech_end:
+            return
+        if preview_active is not None and not preview_active():
+            return
+        self._next_preview = self._samples_seen + int(1.35 * self.sample_rate)
+        self._preview_speech_end = speech_end
+        try:
+            text = transcriber.transcribe_preview(self._recent_audio(4 * self.sample_rate)).strip()
+            if text:
+                self._draft = text
+                if not self._draft_opening and self._samples_seen - self._processed <= 4 * self.sample_rate:
+                    words = _words(text)
+                    if len(words) >= 2:
+                        self._draft_opening = words[:8]
+        except Exception:
+            self._whisper_preview = False
+            logger.exception("Could not update the Whisper preview.")
+
+    def _decode_chunk(self, audio, transcriber, *, whole=False):
+        result = transcriber.transcribe(audio) if whole else transcriber.transcribe_chunk(audio)
+        if not self._draft_opening:
+            return result
+        words = _words(result)
+        beginning = self._draft_opening[:2]
+        if _contains_words(words[:4], beginning):
+            return result
+        if len(words) >= len(self._draft_opening) and not _contains_words(self._draft_opening[1:], words[:2]):
+            return result
+
+        # Both passes use the original audio. Only accept a longer result
+        # that preserves the observed opening and the ordinary pass's ending.
+        try:
+            recovered = transcriber.transcribe_unfiltered(audio)
+            recovered_words = _words(recovered)
+            if (len(recovered_words) > len(words) and _contains_words(recovered_words[:4], beginning)
+                    and _contains_words(recovered_words, words[-2:])):
+                logger.info("Recovered a missing Whisper opening from the original audio.")
+                return recovered
+        except Exception:
+            logger.exception("Could not retry the Whisper opening.")
+        return result
+
+    def _recent_audio(self, window_size):
         blocks = []
         length = 0
         for block in reversed(self._pending):
@@ -92,7 +151,10 @@ class LiveTranscription:
             length += len(block)
             if length >= window_size:
                 break
-        window = np.concatenate(blocks[::-1], axis=0)[-window_size:]
+        return np.concatenate(blocks[::-1], axis=0)[-window_size:]
+
+    def _find_pause(self, pending_samples, window_size):
+        window = self._recent_audio(window_size)
         offset = pending_samples - len(window)
         speech = get_speech_timestamps(
             window.reshape(-1).astype(np.float32) / 32768.0,
@@ -111,16 +173,18 @@ class LiveTranscription:
                     cut = candidate
                     break
             next_start = region["start"]
-        return cut
+        return cut, offset + speech[-1]["end"] if speech else None
 
     def finish(self, audio, transcriber):
-        if self._failed or (not self._processed and self._rolling is None):
+        if self._failed:
             return transcriber.transcribe(audio)
+        if not self._processed and self._rolling is None:
+            return self._decode_chunk(audio, transcriber, whole=True)
 
         remaining = audio[self._processed:]
         if len(remaining):
             if self._rolling is None:
-                text = transcriber.transcribe_chunk(remaining).strip()
+                text = self._decode_chunk(remaining, transcriber).strip()
             else:
                 text = self._rolling.finish(remaining, transcriber)
             if text:

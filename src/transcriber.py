@@ -128,24 +128,35 @@ class WhisperTranscriber:
     def close(self):
         self.model = None
 
+    def transcribe_preview(self, audio_int16):
+        segments, _ = self._recognize(
+            audio_int16, beam_size=1, best_of=1, temperature=0.0, vad_filter=True,
+            without_timestamps=True, condition_on_previous_text=False,
+        )
+        return _strip_whisper_tail("".join(segment.text for segment in segments))
+
+    def transcribe_unfiltered(self, audio_int16):
+        segments, _ = self._recognize(audio_int16, beam_size=5, vad_filter=False, without_timestamps=True)
+        return self.clean_text("".join(segment.text for segment in segments))
+
+    def _recognize(self, audio_int16, **options):
+        if self.model is None:
+            raise RuntimeError("Whisper model is not loaded. Call load_model() first.")
+        audio_float32 = audio_int16.flatten().astype(np.float32) / 32768.0
+        return self.model.transcribe(audio_float32, **options)
+
     def transcribe_chunk(self, audio_int16):
         """
         Normalizes the audio buffer and transcribes it, auto-detecting the language.
         """
-        if self.model is None:
-            raise RuntimeError("Whisper model is not loaded. Call load_model() first.")
-
         logger.info("Initiating transcription of recorded audio buffer...")
         started = time.perf_counter()
-        
-        # Convert audio buffer from int16 to float32 and normalize to [-1.0, 1.0]
-        audio_float32 = audio_int16.flatten().astype(np.float32) / 32768.0
         
         try:
             # Transcribe without language parameter to enable auto-detect
             # Russian and English can be auto-detected and mixed
-            segments, info = self.model.transcribe(
-                audio_float32,
+            segments, info = self._recognize(
+                audio_int16,
                 beam_size=5,
                 vad_filter=self.vad_filter
             )

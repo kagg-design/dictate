@@ -1,46 +1,14 @@
-"""AwesomeHR visual tokens adapted to native Dictate widgets."""
+"""Windows fonts, palettes, and styles for Dictate's native widgets."""
 
-from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
-from pathlib import Path
 from tkinter import TclError
 import tkinter.font as tkfont
 from tkinter import ttk
 import winreg
 
 from PIL import Image, ImageDraw, ImageTk
-
-from src.logger import logger
-
-
-INTER_DIR = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "inter"
-FR_PRIVATE = 0x10
-
-
-@contextmanager
-def bundled_inter():
-    """Make the bundled faces available while Tk is using them in this process."""
-    gdi = ctypes.WinDLL("gdi32", use_last_error=True)
-    add = gdi.AddFontResourceExW
-    remove = gdi.RemoveFontResourceExW
-    add.argtypes = remove.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p)
-    add.restype = ctypes.c_int
-    remove.restype = wintypes.BOOL
-    loaded = []
-    try:
-        for weight in ("Regular", "Bold"):
-            path = str(INTER_DIR / f"Inter-{weight}.ttf")
-            if add(path, FR_PRIVATE, None):
-                loaded.append(path)
-            else:
-                logger.warning("Could not load bundled Inter %s", weight)
-        yield
-    finally:
-        for path in loaded:
-            remove(path, FR_PRIVATE, None)
-
 
 @dataclass(frozen=True)
 class Palette:
@@ -68,18 +36,18 @@ class Palette:
 
 PALETTES = {
     "light": Palette(
-        background="#ffffff", app_background="#f5f5f5", card="#ffffff",
-        foreground="#0a0a0a", muted="#f5f5f5", muted_foreground="#696969",
-        border="#e5e5e5", field_border="#e5e5e5",
+        background="#fafbfd", app_background="#f3f5f8", card="#ffffff",
+        foreground="#1c222c", muted="#f0f3f7", muted_foreground="#535e6e",
+        border="#dfe4ea", field_border="#c9d1db",
         primary="#184eba", primary_foreground="#ffffff", primary_strong="#1451ca",
         primary_surface="#e7effe",
         success="#007a5f", success_surface="#def9f1", info="#005fc6", info_surface="#e5f3ff",
         danger="#c50516", danger_surface="#fff0ee", warning="#af4000", warning_surface="#ffebda",
     ),
     "dark": Palette(
-        background="#0a0a0a", app_background="#262626", card="#171717",
-        foreground="#fafafa", muted="#262626", muted_foreground="#a1a1a1",
-        border="#2f2f2f", field_border="#303030",
+        background="#1b1d22", app_background="#21242a", card="#2a2e36",
+        foreground="#f2f4f8", muted="#343a44", muted_foreground="#b9c1ce",
+        border="#3c434e", field_border="#515a69",
         primary="#7ba4f0", primary_foreground="#061432", primary_strong="#b1cbfa",
         primary_surface="#1d2d4b",
         success="#66d5ba", success_surface="#0a362c", info="#9dc7fe", info_surface="#182e4b",
@@ -132,7 +100,8 @@ class DesktopStyles:
         self.window = window
         self.style = ttk.Style(window)
         fonts = set(tkfont.families(window))
-        self.font = next((f for f in ("Inter", "Inter Variable") if f in fonts), "Segoe UI")
+        self.font = "Segoe UI Variable Text" if "Segoe UI Variable Text" in fonts else "Segoe UI"
+        self.display_font = "Segoe UI Variable Display" if "Segoe UI Variable Display" in fonts else self.font
         self._images = []
         for name, palette in PALETTES.items():
             self.style.theme_create(f"dictate-{name}", parent="clam")
@@ -172,10 +141,50 @@ class DesktopStyles:
             border=radius + 1, padding=2, sticky="nsew",
         )
         layout = self.style.layout(base)
-        root = dict(layout[0][1])
+        if base == "TCombobox":
+            arrow, field = layout
+            root = dict(field[1])
+            root["children"] = [arrow, *root["children"]]
+            layout = [field]
+        else:
+            root = dict(layout[0][1])
         # A filled image is a background. Tk draws border elements over their children.
         root.pop("border", None)
         self.style.layout(name, [(element, root), *layout[1:]])
+
+    def _switch_image(self, p, *, selected=False, disabled=False, focused=False):
+        scale = 4
+        image = Image.new("RGBA", (44 * scale, 26 * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+
+        def box(*coordinates):
+            return tuple(value * scale for value in coordinates)
+
+        fill = p.primary if selected and not disabled else p.muted
+        outline = p.primary if selected and not disabled else p.muted_foreground
+        thumb = p.primary_foreground if selected and not disabled else p.muted_foreground
+        if disabled:
+            outline = thumb = p.field_border
+        if focused:
+            draw.rounded_rectangle(box(0, 0, 43, 25), radius=12 * scale, outline=p.primary, width=scale)
+        draw.rounded_rectangle(box(3, 3, 40, 22), radius=10 * scale, fill=fill, outline=outline, width=scale)
+        x = 26 if selected else 7
+        draw.ellipse(box(x, 7, x + 11, 18), fill=thumb)
+        result = ImageTk.PhotoImage(image.resize((44, 26), Image.Resampling.LANCZOS), master=self.window)
+        self._images.append(result)
+        return result
+
+    def _chevron_image(self, color, *, expanded=False):
+        scale = 4
+        image = Image.new("RGBA", (16 * scale, 16 * scale))
+        near, far = (10, 6) if expanded else (6, 10)
+        ImageDraw.Draw(image).line(
+            [(4 * scale, near * scale), (8 * scale, far * scale), (12 * scale, near * scale)],
+            fill=color, width=6, joint="curve",
+        )
+        result = ImageTk.PhotoImage(image.resize((16, 16), Image.Resampling.LANCZOS), master=self.window)
+        self._images.append(result)
+        return result
 
     def _configure(self, p):
         style = self.style
@@ -193,6 +202,8 @@ class DesktopStyles:
         style.configure("PanelMuted.TLabel", background=p.card, foreground=p.muted_foreground)
         style.configure("Shortcut.TLabel", background=p.background, foreground=p.muted_foreground,
                         font=(self.font, 9), padding=(8, 4))
+        style.configure("SettingsDetail.TLabel", background=p.card, foreground=p.muted_foreground,
+                        font=(self.font, 10))
 
         self._surface("Card.TFrame", "TFrame", 14, p.card, p.border, center=64)
         self._surface("TButton", "TButton", 8, p.card, p.field_border,
@@ -204,11 +215,33 @@ class DesktopStyles:
         self._surface("Selected.Nav.TButton", "TButton", 10, p.primary_surface, p.primary_surface,
                       focus=p.primary, active=p.primary_surface)
         self._surface("TEntry", "TEntry", 8, p.card, p.field_border, focus=p.primary)
+        self._surface("Settings.TButton", "TButton", 6, p.muted, p.field_border,
+                      focus=p.primary, active=p.card, disabled=p.card)
+        self._surface("SettingsHeader.TButton", "TButton", 5, p.card, p.card,
+                      focus=p.primary, active=p.muted)
+        style.element_create(
+            "SettingsHeader.chevron", "image", self._chevron_image(p.muted_foreground),
+            ("selected", self._chevron_image(p.muted_foreground, expanded=True)),
+        )
+        style.layout("SettingsHeader.TButton", [
+            ("SettingsHeader.TButton.surface", {"sticky": "nsew", "children": [
+                ("Button.padding", {"sticky": "nsew", "children": [
+                    ("SettingsHeader.chevron", {"side": "right"}),
+                    ("Button.label", {"side": "left", "sticky": "w"}),
+                ]}),
+            ]}),
+        ])
+        self._surface("Settings.TCombobox", "TCombobox", 6, p.muted, p.field_border,
+                      focus=p.primary, active=p.muted, disabled=p.card)
         style.configure("TButton", background=p.app_background, padding=(12, 7), focuscolor=p.primary)
         style.map("TButton", foreground=[("disabled", p.muted_foreground)])
         style.configure("Action.TButton", foreground=p.primary_foreground)
         style.configure("Nav.TButton", background=p.background, padding=(12, 7))
         style.configure("Selected.Nav.TButton", foreground=p.primary_strong, font=(self.font, 10, "bold"))
+        style.configure("Settings.TButton", background=p.card, padding=(10, 5))
+        style.configure("SettingsHeader.TButton", background=p.card, foreground=p.foreground,
+                        font=(self.font, 12, "bold"), padding=(10, 6))
+        style.configure("Shortcut.Settings.TButton", foreground=p.primary_strong, font=(self.font, 10, "bold"))
         style.configure("TEntry", font=(self.font, 10), fieldbackground=p.card, padding=(10, 7), insertcolor=p.foreground)
         style.configure("TCombobox", font=(self.font, 10), background=p.card, fieldbackground=p.card, bordercolor=p.field_border,
                         arrowcolor=p.muted_foreground, lightcolor=p.card, darkcolor=p.card,
@@ -216,6 +249,20 @@ class DesktopStyles:
         style.map("TCombobox", background=[("active", p.muted), ("pressed", p.muted), ("readonly", p.card)],
                   fieldbackground=[("disabled", p.muted), ("readonly", p.card)],
                   bordercolor=[("focus", p.primary)], foreground=[("disabled", p.muted_foreground)])
+        style.configure("Settings.TCombobox", fieldbackground=p.muted, background=p.muted, padding=(10, 5),
+                        lightcolor=p.muted, darkcolor=p.muted, bordercolor=p.muted)
+        style.map("Settings.TCombobox", background=[("disabled", p.card), ("readonly", p.muted)],
+                  fieldbackground=[("disabled", p.card), ("readonly", p.muted)])
+        style.element_create(
+            "Switch.indicator", "image", self._switch_image(p),
+            ("disabled", "selected", self._switch_image(p, selected=True, disabled=True)),
+            ("disabled", self._switch_image(p, disabled=True)),
+            ("focus", "selected", self._switch_image(p, selected=True, focused=True)),
+            ("focus", self._switch_image(p, focused=True)),
+            ("selected", self._switch_image(p, selected=True)),
+        )
+        style.layout("Switch.TCheckbutton", [("Switch.indicator", {"sticky": ""})])
+        style.configure("Switch.TCheckbutton", background=p.card)
         style.configure("ComboboxPopdownFrame", background=p.border, bordercolor=p.border)
         style.configure("TRadiobutton", padding=(0, 6))
         for widget in ("TRadiobutton", "TCheckbutton"):
@@ -232,8 +279,6 @@ class DesktopStyles:
             self._surface(label, "TLabel", 6, fill, fill)
             style.configure(label, background=p.background, foreground=foreground,
                             font=(self.font, 9, "bold"), padding=(7, 3))
-            style.configure(status.title() + ".Notice.TLabel", background=fill, foreground=foreground,
-                            padding=(12, 8))
 
         style.configure("Treeview", rowheight=40, background=p.card, fieldbackground=p.card,
                         borderwidth=0, bordercolor=p.border, lightcolor=p.border, darkcolor=p.border,
@@ -250,5 +295,18 @@ class DesktopStyles:
                 ("Vertical.Scrollbar.thumb", {"sticky": "nsew"}),
             ]}),
         ])
+        style.configure("Settings.Vertical.TScrollbar", background=p.field_border, troughcolor=p.app_background,
+                        bordercolor=p.app_background, lightcolor=p.app_background, darkcolor=p.app_background)
+        style.element_create(
+            "Settings.Scrollbar.thumb", "image", self._rounded(3, p.field_border, p.field_border, center=2),
+            ("disabled", self._rounded(3, p.app_background, p.app_background, center=2)),
+            ("active", self._rounded(3, p.muted_foreground, p.muted_foreground, center=2)),
+            border=4, sticky="ns",
+        )
+        style.layout("Settings.Vertical.TScrollbar", [
+            ("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                ("Settings.Scrollbar.thumb", {"sticky": "ns"}),
+            ]}),
+        ])
         style.configure("Input.Horizontal.TProgressbar", background=p.primary, troughcolor=p.primary_surface,
-                        bordercolor=p.primary_surface, lightcolor=p.primary, darkcolor=p.primary, arrowsize=8)
+                        bordercolor=p.primary_surface, lightcolor=p.primary, darkcolor=p.primary, thickness=6)

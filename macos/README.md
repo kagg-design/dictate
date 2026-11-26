@@ -12,7 +12,9 @@ The beta uses the current macOS default microphone and decodes completed phrases
 
 In **Settings**, choose the shortcut and enable **Press to start / stop** for hands-free dictation. With **Esc cancels and keeps text in History** enabled, Escape ends the recording and saves any recognized text without inserting it. **Copy Last Dictation** is available in the menu bar and with **Control + Command + V**.
 
-**Show live transcript while dictating** is off by default. Enable **Start Dictate at login** to use the macOS login item. If macOS asks for approval, enable Dictate under **System Settings → General → Login Items**.
+Choose **Insert Last Dictation** in the menu bar or press **Control + Command + F9** to insert the most recent transcript into the focused editor without using the clipboard. Under **Settings → Dictation controls**, click either shortcut and hold two or three keys together to record it. Use modifiers alone or add one other key. You can turn off the insert shortcut and still use the menu.
+
+A pulsing red microphone appears while Dictate is recording. **Play recording sounds** plays distinct start and stop cues. **Show live transcript while dictating** adds text to the indicator and is off by default. Enable **Start Dictate at login** to use the macOS login item. If macOS asks for approval, enable Dictate under **System Settings → General → Login Items**.
 
 Select a word or phrase in **History** and choose **Add replacement…** to fix its spelling in future dictations. Edit or remove saved rules under **Settings → Text replacements**.
 

@@ -1,4 +1,4 @@
-"""Global shortcuts for dictating, canceling and copying the last transcript."""
+"""Global shortcuts for dictating, canceling and reusing the last transcript."""
 
 from queue import SimpleQueue
 from threading import Lock, Thread
@@ -6,50 +6,82 @@ from time import monotonic
 
 import keyboard
 
+from src.inserter import mask_start_menu
 from src.logger import logger
+from src.shortcuts import (
+    COPY_LAST, DEFAULT_INSERT_LAST_SHORTCUT, DEFAULT_SHORTCUT, DICTATION_DEFAULT, INSERT_LAST_DEFAULT,
+    MODIFIERS, Shortcut, load_shortcut, validate_shortcuts,
+)
 
 
-SHORTCUTS = {
-    "ctrl+win": "Ctrl+Win",
-    "ctrl+alt+space": "Ctrl+Alt+Space",
-    "ctrl+shift+space": "Ctrl+Shift+Space",
-}
 MODES = {"hold": "Hold to dictate", "toggle": "Press to start / stop"}
-DEFAULT_SHORTCUT = "ctrl+win"
-COPY_MODIFIERS = frozenset({"ctrl", "win"})
-MODIFIERS = frozenset({"ctrl", "win", "alt", "shift", "alt gr"})
+KEEP_INSERT_SHORTCUT = object()
 
 
 class HotkeyManager:
-    def __init__(self, on_trigger_start, on_trigger_stop, *, on_cancel=None, on_copy=None,
-                 shortcut=DEFAULT_SHORTCUT, mode="hold", escape_cancels=True):
+    def __init__(self, on_trigger_start, on_trigger_stop, *, on_cancel=None, on_copy=None, on_insert=None,
+                 shortcut=DEFAULT_SHORTCUT, mode="hold", escape_cancels=True,
+                 insert_last_shortcut=DEFAULT_INSERT_LAST_SHORTCUT):
         self.on_trigger_start = on_trigger_start
         self.on_trigger_stop = on_trigger_stop
         self.on_cancel = on_cancel
         self.on_copy = on_copy
-        self.shortcut = shortcut if isinstance(shortcut, str) and shortcut in SHORTCUTS else DEFAULT_SHORTCUT
+        self.on_insert = on_insert
+        self.shortcut = load_shortcut(shortcut, DICTATION_DEFAULT)
         self.mode = mode if isinstance(mode, str) and mode in MODES else "hold"
         self.escape_cancels = escape_cancels
+        self.insert_last_shortcut = load_shortcut(insert_last_shortcut, INSERT_LAST_DEFAULT)
+        if insert_last_shortcut == "off":
+            self.insert_last_shortcut = None
+        try:
+            validate_shortcuts(self.shortcut, self.insert_last_shortcut)
+        except ValueError:
+            # Keep the application usable even if settings were edited by hand.
+            if self.shortcut == COPY_LAST:
+                self.shortcut = DICTATION_DEFAULT
+            self.insert_last_shortcut = None
         self.is_active = False
         self.paused = False
         self._pressed = {}
         self._suppressed = set()
         self._chord_down = False
         self._toggle_armed = False
+        self._insert_armed = False
         self._hold_started = 0.0
-        self._win_needs_release = False
+        self._capture = None
+        self._capture_size = 0
+        self._capture_result = None
         self._state_lock = Lock()
         self._hook = None
         self._actions = None
 
-    def configure(self, shortcut, mode, escape_cancels):
+    def configure(self, shortcut, mode, escape_cancels, *, insert_last_shortcut=KEEP_INSERT_SHORTCUT):
         with self._state_lock:
-            self.shortcut = shortcut
+            self.shortcut = shortcut if isinstance(shortcut, Shortcut) else Shortcut.from_setting(shortcut)
             self.mode = mode
             self.escape_cancels = escape_cancels
+            if insert_last_shortcut is not KEEP_INSERT_SHORTCUT:
+                self.insert_last_shortcut = (
+                    insert_last_shortcut if isinstance(insert_last_shortcut, Shortcut) or insert_last_shortcut is None
+                    else load_shortcut(insert_last_shortcut, None)
+                )
             # Disarm a combination already held while applying the settings.
-            self._chord_down = self._matches()
-            self._toggle_armed = False
+            self._chord_down = self._matches(self.shortcut, MODIFIERS.intersection(self._pressed.values()))
+            self._toggle_armed = self._insert_armed = False
+
+    def begin_capture(self, results):
+        with self._state_lock:
+            if self.is_active or self._capture is not None:
+                return False
+            self._capture = results
+            self._capture_size = 0
+            self._capture_result = None
+            self._toggle_armed = self._insert_armed = False
+            return True
+
+    def cancel_capture(self):
+        with self._state_lock:
+            self._capture = None
 
     def start_listening(self):
         actions = SimpleQueue()
@@ -70,13 +102,10 @@ class HotkeyManager:
             self._actions.put(None)
             self._actions = None
         with self._state_lock:
-            restore_win = self._win_needs_release
-            self._win_needs_release = False
             self._pressed.clear()
             self._suppressed.clear()
-            self.is_active = self._chord_down = self._toggle_armed = False
-        if restore_win:
-            self._restore_windows_key_state()
+            self.is_active = self._chord_down = self._toggle_armed = self._insert_armed = False
+            self._capture = None
 
     def set_paused(self, paused):
         with self._state_lock:
@@ -94,24 +123,62 @@ class HotkeyManager:
             self.is_active = False
             self._toggle_armed = False
 
-    def _matches(self):
-        keys = set(self._pressed.values())
-        required = set(self.shortcut.split("+"))
-        return keys & MODIFIERS == required & MODIFIERS and required <= keys
+    def _matches(self, shortcut, modifiers):
+        return shortcut.modifiers == modifiers and (shortcut.key is None or shortcut.key in self._pressed)
+
+    def _capture_event(self, down, repeat, name, modifiers):
+        if down and not repeat and name == "esc" and not modifiers:
+            self._capture.put((None, ""))
+            self._capture = None
+        elif down and not repeat and len(self._pressed) >= self._capture_size:
+            self._capture_size = len(self._pressed)
+            ordinary = [(key, label) for key, label in self._pressed.items() if label not in MODIFIERS]
+            try:
+                if len(ordinary) > 1 or self._capture_size != len(modifiers) + len(ordinary):
+                    raise ValueError("Use at most one ordinary key with the modifiers.")
+                key, label = ordinary[0] if ordinary else (None, "")
+                self._capture_result = (Shortcut(modifiers, key, label.title()), "")
+            except ValueError as exc:
+                self._capture_result = (None, str(exc))
+        elif not down and not self._pressed and self._capture_result is not None:
+            self._capture.put(self._capture_result)
+            self._capture = None
+
+    def _insert_triggered(self, down, repeat, key, name, modifiers):
+        shortcut = self.insert_last_shortcut
+        if shortcut is None or self.on_insert is None:
+            return False
+        if shortcut.key is not None:
+            return down and not repeat and key == shortcut.key and modifiers == shortcut.modifiers
+        if down and not repeat:
+            self._insert_armed = (
+                name in MODIFIERS and modifiers == shortcut.modifiers
+                and all(value in MODIFIERS for value in self._pressed.values())
+            )
+        elif not down and self._insert_armed and modifiers != shortcut.modifiers:
+            self._insert_armed = False
+            return True
+        return False
 
     def _handle_event(self, event):
         # The Windows hook only tracks keys and queues actions. Recording and
         # clipboard work can block, so they run on the ordered worker instead.
-        name = (event.name or "").removeprefix("left ").removeprefix("right ")
+        if event.scan_code == -0xFF:
+            return True  # neutral Win-menu mask sent by Dictate
+        name = (event.name or f"Key {event.scan_code}").lower()
+        side_independent = name.removeprefix("left ").removeprefix("right ")
+        if side_independent in MODIFIERS or side_independent == "windows":
+            name = side_independent
         if name == "windows":
             name = "win"
         elif name == "escape":
             name = "esc"
-        elif event.scan_code == 0x2F:  # physical V, including non-Latin keyboard layouts
-            name = "v"
-        if name not in MODIFIERS and name not in {"v", "esc", "space"}:
-            return True
-        key = (event.scan_code, event.name if name in MODIFIERS else name)
+        # Win has distinct scan codes for left and right. Its reported name can
+        # differ across layouts, so a key-up must match by the physical code.
+        key = (
+            event.scan_code,
+            (name if name == "win" else event.name) if name in MODIFIERS else bool(getattr(event, "is_keypad", False)),
+        )
         down = event.event_type == "down"
         actions = []
         with self._state_lock:
@@ -121,32 +188,56 @@ class HotkeyManager:
             else:
                 self._pressed.pop(key, None)
             modifiers = MODIFIERS.intersection(self._pressed.values())
-            previous, self._chord_down = self._chord_down, self._matches()
             consume = key in self._suppressed
+            if self._capture is not None:
+                self._capture_event(down, repeat, name, modifiers)
+                self._chord_down = self._matches(self.shortcut, modifiers)
+                if down and (name == "win" or name not in MODIFIERS):
+                    self._suppressed.add(key)
+                    return False
+                if not down:
+                    self._suppressed.discard(key)
+                return not consume
+            previous, self._chord_down = self._chord_down, self._matches(self.shortcut, modifiers)
+            copying = (
+                down and not repeat and key == COPY_LAST.key and modifiers == COPY_LAST.modifiers
+                and self.on_copy is not None
+            )
+            inserting = self._insert_triggered(down, repeat, key, name, modifiers)
+            activating = (
+                self._chord_down and not previous and down and not repeat and not self.paused
+                and (self.shortcut.key is None or key == self.shortcut.key)
+            )
 
-            if down and not repeat and name == "v" and modifiers == COPY_MODIFIERS and self.on_copy:
+            if copying:
                 consume = True
                 self._toggle_armed = False
-                if (self.is_active and self.shortcut == DEFAULT_SHORTCUT and self.mode == "hold"
+                if (self.is_active and self.shortcut == DICTATION_DEFAULT and self.mode == "hold"
                         and monotonic() - self._hold_started < 0.35):
                     self.is_active = False
                     actions.append((self.on_cancel, (False,)))
                 actions.append((self.on_copy, ()))
-            elif down and not repeat and name == "esc" and self.escape_cancels and self.is_active and self.on_cancel:
+            elif inserting:
+                consume |= down and name not in MODIFIERS
+                actions.append((self.on_insert, ()))
+            elif (down and not repeat and name == "esc" and not activating
+                  and self.escape_cancels and self.is_active and self.on_cancel):
                 consume = True
                 self.is_active = self._toggle_armed = False
                 actions.append((self.on_cancel, (True,)))
             elif not self.paused:
-                if self._chord_down and not previous and down:
-                    consume |= name == "space"
-                    if self.mode == "toggle" and self.shortcut == DEFAULT_SHORTCUT:
-                        # Decide on release so a following V can select Copy.
+                if activating:
+                    consume |= self.shortcut.key is not None
+                    if self.mode == "toggle" and self.shortcut.key is None:
+                        # Decide on release so a key after the modifiers can select another action.
                         self._toggle_armed = True
                     else:
                         self.is_active = not self.is_active
                         if self.mode == "hold":
                             self._hold_started = monotonic()
                         actions.append((self.on_trigger_start if self.is_active else self.on_trigger_stop, ()))
+                elif self._toggle_armed and down and name not in MODIFIERS:
+                    self._toggle_armed = False
                 elif previous and not self._chord_down:
                     if self._toggle_armed and not down:
                         self.is_active = not self.is_active
@@ -156,30 +247,26 @@ class HotkeyManager:
                         actions.append((self.on_trigger_stop, ()))
                     self._toggle_armed = False
 
-            if name == "win":
-                # If Win went down first, Windows saw it. Release it with a
-                # Ctrl wrapper after the chord so Start doesn't open.
-                if self.shortcut == DEFAULT_SHORTCUT and not self.paused and (previous or self._chord_down):
-                    if not consume and (not down or repeat):
-                        self._win_needs_release = True
-                    consume = True
-                elif down and not consume:
-                    self._win_needs_release = False
-            if self.shortcut == DEFAULT_SHORTCUT and self._chord_down and not previous and name == "ctrl":
-                self._win_needs_release |= any(
-                    pressed_name == "win" and pressed_key not in self._suppressed
-                    for pressed_key, pressed_name in self._pressed.items()
-                )
-            if self._win_needs_release and previous and not self._chord_down:
-                self._win_needs_release = False
-                actions.append((self._restore_windows_key_state, ()))
+            # Block Win only if we can block its first down event. If Windows
+            # saw that press, it must also receive its physical release.
+            if name == "win" and activating and self.shortcut.key is None:
+                consume = True
             if consume and down:
                 self._suppressed.add(key)
             elif not down:
                 self._suppressed.discard(key)
+            mask_menu = (copying or inserting or activating or self._insert_armed) and any(
+                pressed_name == "win" and pressed_key not in self._suppressed
+                for pressed_key, pressed_name in self._pressed.items()
+            )
 
         for callback, args in actions:
             self._schedule(callback, *args)
+        if mask_menu:
+            # Send the neutral key before returning from the chord's key-down.
+            # keyboard.send would put the entire hook into replay mode and
+            # could drop a real Win or Ctrl key-up during that interval.
+            mask_start_menu()
         return not consume
 
     def _schedule(self, callback, *args):
@@ -202,14 +289,3 @@ class HotkeyManager:
                 self.cancel_active()
         except Exception:
             logger.exception("Dictate shortcut failed")
-
-    def _restore_windows_key_state(self):
-        # keyboard.send suppresses replayed events from the hook. Leave a
-        # physically held Ctrl alone so other shortcuts continue to work.
-        with self._state_lock:
-            ctrl_held = "ctrl" in self._pressed.values()
-        if ctrl_held:
-            keyboard.send("left windows+right windows", do_press=False)
-        else:
-            keyboard.send("ctrl", do_release=False)
-            keyboard.send("ctrl+left windows+right windows", do_press=False)

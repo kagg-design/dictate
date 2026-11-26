@@ -68,6 +68,11 @@ private struct DictateMenu: View {
             openWindow(id: "dictate")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Button("Insert Last Dictation") {
+            // Use the editor once the menu is dismissed.
+            DispatchQueue.main.async { state.insertLatest() }
+        }
+        .disabled(state.history.isEmpty || state.recording || state.finishing)
         Button("Copy Last Dictation") { state.copyLatest() }
             .disabled(state.history.isEmpty)
         Divider()
@@ -79,13 +84,19 @@ private struct DictateMenu: View {
 
 @MainActor
 final class DictateState: ObservableObject {
+    enum ShortcutSlot: Equatable { case dictation, insertLast }
+
     @Published private(set) var selectedModel: SpeechModel
     @Published private(set) var preRoll: Int
     @Published private(set) var saveWav: Bool
-    @Published private(set) var shortcutChoice: ShortcutChoice
+    @Published private(set) var shortcutChoice: ShortcutBinding
+    @Published private(set) var insertLastShortcut: ShortcutBinding? = nil
+    @Published private(set) var capturingShortcut: ShortcutSlot? = nil
+    @Published private(set) var shortcutError = ""
     @Published private(set) var toggleMode: Bool
     @Published private(set) var escapeCancels: Bool
     @Published private(set) var livePreview: Bool
+    @Published private(set) var recordingSounds: Bool
     @Published private(set) var useCursorContext: Bool
     @Published private(set) var replacements: TextReplacements
     @Published private(set) var loginEnabled = false
@@ -109,6 +120,9 @@ final class DictateState: ObservableObject {
     private var player: AVAudioPlayer?
     private var maySaveHistory = true
     private var preview: DictationPreview?
+    private var insertingLast = false
+    private lazy var startSound = NSSound(named: "Tink")
+    private lazy var stopSound = NSSound(named: "Pop")
 
     private final class Session {
         let target = InsertionTarget()
@@ -130,10 +144,21 @@ final class DictateState: ObservableObject {
         let saved = defaults.object(forKey: "preRoll") as? Int ?? 500
         preRoll = [0, 250, 500, 1_000].contains(saved) ? saved : 500
         saveWav = defaults.bool(forKey: "saveWav")
-        shortcutChoice = defaults.string(forKey: "shortcut").flatMap(ShortcutChoice.init(rawValue:)) ?? .controlOption
+        let savedDictation = ShortcutBinding.decode(defaults.data(forKey: "dictationShortcutBinding")) ??
+            ShortcutBinding.legacyDictation(defaults.string(forKey: "shortcut"))
+        let dictation = savedDictation.conflicts(with: .copyLast) ? .dictationDefault : savedDictation
+        shortcutChoice = dictation
+        if !defaults.bool(forKey: "insertLastShortcutDisabled") {
+            let savedInsert = ShortcutBinding.decode(defaults.data(forKey: "insertLastShortcutBinding")) ??
+                .insertLastDefault
+            if !savedInsert.conflicts(with: .copyLast) && !savedInsert.conflicts(with: dictation) {
+                insertLastShortcut = savedInsert
+            }
+        }
         toggleMode = defaults.bool(forKey: "toggleMode")
         escapeCancels = defaults.object(forKey: "escapeCancels") as? Bool ?? true
         livePreview = defaults.bool(forKey: "livePreview")
+        recordingSounds = defaults.object(forKey: "recordingSounds") as? Bool ?? true
         useCursorContext = defaults.object(forKey: "useCursorContext") as? Bool ?? true
         replacements = TextReplacements(
             defaults.dictionary(forKey: "textReplacements") as? [String: String] ?? [:],
@@ -153,6 +178,7 @@ final class DictateState: ObservableObject {
             catch { status = "Could not clean up older recordings." }
         }
         shortcut.choice = shortcutChoice
+        shortcut.insertLast = insertLastShortcut
         shortcut.toggle = toggleMode
         shortcut.escapeCancels = escapeCancels
         shortcut.changed = { [weak self] action in
@@ -162,6 +188,7 @@ final class DictateState: ObservableObject {
                 case .finish: self?.finish()
                 case .cancel: self?.finish(insert: false)
                 case .copy: self?.copyLatest()
+                case .insertLast: self?.insertLatest()
                 }
             }
         }
@@ -237,10 +264,62 @@ final class DictateState: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "saveWav")
     }
 
-    func setShortcut(_ choice: ShortcutChoice) {
-        shortcutChoice = choice
-        shortcut.choice = choice
-        UserDefaults.standard.set(choice.rawValue, forKey: "shortcut")
+    func captureShortcut(_ slot: ShortcutSlot) {
+        if capturingShortcut != nil {
+            cancelShortcutCapture()
+            return
+        }
+        guard shortcut.beginCapture({ [weak self] binding, error in
+            DispatchQueue.main.async {
+                guard let self, self.capturingShortcut == slot else { return }
+                self.capturingShortcut = nil
+                if let binding { self.saveShortcut(binding, slot: slot) }
+                else { self.shortcutError = error }
+            }
+        }) else {
+            shortcutError = "Allow Input Monitoring to record a shortcut."
+            return
+        }
+        shortcutError = ""
+        capturingShortcut = slot
+    }
+
+    func cancelShortcutCapture() {
+        shortcut.cancelCapture()
+        capturingShortcut = nil
+    }
+
+    func disableInsertLastShortcut() {
+        insertLastShortcut = nil
+        shortcut.insertLast = nil
+        shortcutError = ""
+        UserDefaults.standard.set(true, forKey: "insertLastShortcutDisabled")
+    }
+
+    private func saveShortcut(_ binding: ShortcutBinding, slot: ShortcutSlot) {
+        guard !binding.conflicts(with: .copyLast) else {
+            shortcutError = "Control + Command + V is assigned to Copy Last Dictation."
+            return
+        }
+        let other = slot == .dictation ? insertLastShortcut : shortcutChoice
+        guard other.map({ !binding.conflicts(with: $0) }) ?? true else {
+            shortcutError = "Choose distinct shortcuts for dictation and Insert Last Dictation."
+            return
+        }
+        guard let data = try? JSONEncoder().encode(binding) else {
+            shortcutError = "Could not save the shortcut."
+            return
+        }
+        if slot == .dictation {
+            UserDefaults.standard.set(data, forKey: "dictationShortcutBinding")
+            shortcutChoice = binding
+            shortcut.choice = binding
+        } else {
+            UserDefaults.standard.set(data, forKey: "insertLastShortcutBinding")
+            UserDefaults.standard.set(false, forKey: "insertLastShortcutDisabled")
+            insertLastShortcut = binding
+            shortcut.insertLast = binding
+        }
     }
 
     func setToggleMode(_ enabled: Bool) {
@@ -257,8 +336,13 @@ final class DictateState: ObservableObject {
 
     func setLivePreview(_ enabled: Bool) {
         livePreview = enabled
-        if !enabled { preview?.hide() }
+        if !enabled && recording { preview?.show("") }
         UserDefaults.standard.set(enabled, forKey: "livePreview")
+    }
+
+    func setRecordingSounds(_ enabled: Bool) {
+        recordingSounds = enabled
+        UserDefaults.standard.set(enabled, forKey: "recordingSounds")
     }
 
     func setUseCursorContext(_ enabled: Bool) {
@@ -284,6 +368,28 @@ final class DictateState: ObservableObject {
 
     func copyLatest() {
         if let last = history.first { copy(last) }
+    }
+
+    func insertLatest() {
+        guard !recording, !finishing, !insertingLast, let last = history.first else { return }
+        guard let target = InsertionTarget() else {
+            status = "Allow Accessibility and focus a text field to insert."
+            return
+        }
+        insertingLast = true
+        Task {
+            defer { insertingLast = false }
+            let deadline = ContinuousClock.now + .seconds(3)
+            while !CGEventSource.flagsState(.combinedSessionState)
+                .intersection(ShortcutBinding.modifierMask).isEmpty {
+                guard ContinuousClock.now < deadline else { return }
+                try? await Task.sleep(for: .milliseconds(15))
+            }
+            guard !recording, !finishing else { return }
+            if !target.insert(last.text, useCursorContext: useCursorContext) {
+                status = "Could not insert the last dictation. Check Accessibility and the focused field."
+            }
+        }
     }
 
     func saveReplacement(_ draft: ReplacementDraft) throws {
@@ -384,6 +490,9 @@ final class DictateState: ObservableObject {
             self.session = session
             recording = true
             status = "Recording"
+            if preview == nil { preview = DictationPreview() }
+            preview?.showRecording()
+            if recordingSounds { playRecordingSound(startSound, interrupting: stopSound) }
         } catch {
             shortcut.disarm()
             status = error.localizedDescription
@@ -406,7 +515,6 @@ final class DictateState: ObservableObject {
                 session.consumed += cut
                 session.attempted = 0
                 if self.recording && self.livePreview {
-                    if self.preview == nil { self.preview = DictationPreview() }
                     self.preview?.show(String(session.parts.joined(separator: " ").suffix(180)))
                 }
             }
@@ -421,6 +529,7 @@ final class DictateState: ObservableObject {
         status = "Finishing dictation…"
         let interrupted = recorder.interrupted
         let samples = recorder.stop()
+        if recordingSounds { playRecordingSound(stopSound, interrupting: startSound) }
         if Date().timeIntervalSince(session.date) < 0.3 {
             finishing = false
             self.session = nil
@@ -428,8 +537,16 @@ final class DictateState: ObservableObject {
             return
         }
         let keepWav = saveWav
+        let feedback = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self, self.finishing else { return }
+            self.preview?.showProcessing()
+        }
+        let target = insert ? session.target?.resolved() : nil
         Task {
             defer {
+                feedback.cancel()
+                preview?.hide()
                 finishing = false
                 self.session = nil
             }
@@ -452,7 +569,7 @@ final class DictateState: ObservableObject {
                     // Keep the new transcript recoverable in memory after a failed write.
                     history = HistoryEntry.retained(updated, audioDays: 0)
                 }
-                let inserted = insert && (session.target?.insert(full, useCursorContext: useCursorContext) ?? false)
+                let inserted = target?.insert(full, useCursorContext: useCursorContext) ?? false
                 if !insert {
                     status = "Insertion canceled. Text available in History."
                 } else if interrupted {
@@ -464,6 +581,12 @@ final class DictateState: ObservableObject {
                 status = error.localizedDescription
             }
         }
+    }
+
+    private func playRecordingSound(_ sound: NSSound?, interrupting previous: NSSound?) {
+        previous?.stop()
+        sound?.volume = 0.35
+        sound?.play()
     }
 }
 
@@ -499,14 +622,28 @@ private struct DictateWindow: View {
                     .disabled(state.busy)
             }
             Section("Dictation controls") {
-                Picker("Shortcut", selection: Binding(get: { state.shortcutChoice }, set: state.setShortcut)) {
-                    ForEach(ShortcutChoice.allCases, id: \.self) { Text($0.label).tag($0) }
+                LabeledContent("Dictation shortcut") {
+                    shortcutButton(.dictation, label: state.shortcutChoice.label)
+                }
+                LabeledContent("Insert last shortcut") {
+                    if let binding = state.insertLastShortcut {
+                        Button("Turn off", action: state.disableInsertLastShortcut)
+                            .disabled(state.capturingShortcut != nil)
+                        shortcutButton(.insertLast, label: binding.label)
+                    } else {
+                        shortcutButton(.insertLast, label: "Off")
+                    }
+                }
+                if !state.shortcutError.isEmpty {
+                    Text(state.shortcutError).font(.callout).foregroundStyle(.red)
                 }
                 Toggle("Press to start / stop", isOn: Binding(get: { state.toggleMode }, set: state.setToggleMode))
                 Toggle("Esc cancels and keeps text in History",
                        isOn: Binding(get: { state.escapeCancels }, set: state.setEscapeCancels))
                 Toggle("Show live transcript while dictating",
                        isOn: Binding(get: { state.livePreview }, set: state.setLivePreview))
+                Toggle("Play recording sounds",
+                       isOn: Binding(get: { state.recordingSounds }, set: state.setRecordingSounds))
                 Toggle("Use text around the cursor",
                        isOn: Binding(get: { state.useCursorContext }, set: state.setUseCursorContext))
             }
@@ -558,6 +695,18 @@ private struct DictateWindow: View {
         }
         .formStyle(.grouped)
         .onAppear { state.refreshLoginStatus() }
+        .onDisappear { state.cancelShortcutCapture() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            state.cancelShortcutCapture()
+        }
+    }
+
+    private func shortcutButton(_ slot: DictateState.ShortcutSlot, label: String) -> some View {
+        Button(state.capturingShortcut == slot ? "Press 2 or 3 keys…" : label) {
+            state.captureShortcut(slot)
+        }
+        .disabled(state.capturingShortcut != nil && state.capturingShortcut != slot)
+        .help("Click, then hold two or three keys together. Press Esc to cancel.")
     }
 
     private var history: some View {

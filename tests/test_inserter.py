@@ -32,6 +32,27 @@ class TextInserterTests(unittest.TestCase):
         expected_size = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
         self.assertEqual(ctypes.sizeof(inserter.INPUT), expected_size)
 
+    def test_start_menu_mask_sends_no_ctrl_or_win_events(self):
+        user32 = Mock()
+        user32.SendInput.return_value = 2
+        with patch.object(inserter.ctypes, "WinDLL", return_value=user32):
+            inserter.mask_start_menu()
+        count, events, struct_size = user32.SendInput.call_args.args
+        self.assertEqual(count, 2)
+        self.assertEqual(struct_size, ctypes.sizeof(inserter.INPUT))
+        self.assertEqual([(event.ki.wVk, event.ki.dwFlags) for event in events], [(0xFF, 0), (0xFF, 2)])
+
+    def test_repeat_insertion_is_skipped_when_focus_moves(self):
+        with (
+            patch.object(inserter, "_wait_for_modifiers_released", return_value=True),
+            patch.object(inserter, "current_insertion_target", return_value=inserter.InsertionTarget(80, 81)),
+            patch.object(inserter, "_try_insert_native_text") as native,
+            patch.object(inserter, "_send_unicode_text") as unicode_input,
+        ):
+            inserter.paste_text("last dictation", target=inserter.InsertionTarget(40, 41))
+        native.assert_not_called()
+        unicode_input.assert_not_called()
+
     def test_paste_text_uses_direct_insertion(self):
         call_order = []
         with (

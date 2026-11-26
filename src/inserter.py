@@ -2,6 +2,7 @@ import ctypes
 import sys
 import time
 from ctypes import wintypes
+from dataclasses import dataclass
 
 from src.cursor_context import format_for_cursor, read_cursor_context
 from src.logger import logger
@@ -10,6 +11,7 @@ from src.logger import logger
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
+MENU_MASK_KEY = 0xFF
 UNICODE_CHARACTER_INTERVAL_SECONDS = 0.005
 EM_REPLACESEL = 0x00C2
 WM_CHAR = 0x0102
@@ -83,7 +85,27 @@ class GUITHREADINFO(ctypes.Structure):
     )
 
 
-def paste_text(text, *, use_cursor_context=True):
+@dataclass(frozen=True)
+class InsertionTarget:
+    window: int
+    control: int
+
+
+def mask_start_menu():
+    """Mark a forwarded Win press as used without synthesizing any modifiers."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    send_input = user32.SendInput
+    send_input.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+    send_input.restype = wintypes.UINT
+    events = (INPUT * 2)(
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(MENU_MASK_KEY, 0, 0, 0, 0)),
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(MENU_MASK_KEY, 0, KEYEVENTF_KEYUP, 0, 0)),
+    )
+    if send_input(len(events), events, ctypes.sizeof(INPUT)) != len(events):
+        logger.warning("Could not mask the Windows Start menu for the dictation shortcut.")
+
+
+def paste_text(text, *, use_cursor_context=True, target=None):
     """Insert text into the focused Windows control without using the clipboard."""
     if not text:
         logger.info("No text to insert. Skipping text insertion.")
@@ -94,11 +116,17 @@ def paste_text(text, *, use_cursor_context=True):
         return
 
     try:
-        _wait_for_modifiers_released()
+        if target is None:
+            _wait_for_modifiers_released()
+        elif not _wait_for_modifiers_released(timeout=3) or current_insertion_target() != target:
+            logger.info("Skipped inserting the last dictation because the shortcut or focus changed.")
+            return
         text_to_insert = (
             format_for_cursor(text, _read_insert_context()) if use_cursor_context else text.strip(" \t")
         )
         if not text_to_insert:
+            return
+        if target is not None and current_insertion_target() != target:
             return
         logger.info("Inserting text directly (%d characters).", len(text_to_insert))
         if not _try_insert_native_text(text_to_insert):
@@ -110,7 +138,7 @@ def paste_text(text, *, use_cursor_context=True):
         raise
 
 
-def _wait_for_modifiers_released():
+def _wait_for_modifiers_released(*, timeout=None):
     """Wait until physical modifiers are released for several consecutive polls."""
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
@@ -118,7 +146,10 @@ def _wait_for_modifiers_released():
 
     stable_checks = 0
     waiting_logged = False
+    deadline = time.monotonic() + timeout if timeout is not None else None
     while stable_checks < MODIFIER_RELEASE_STABLE_CHECKS:
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
         pressed = _pressed_modifier_names(user32)
         if pressed:
             stable_checks = 0
@@ -136,6 +167,7 @@ def _wait_for_modifiers_released():
 
     if waiting_logged:
         logger.info("Modifiers released; continuing deferred text insertion.")
+    return True
 
 
 def _pressed_modifier_names(user32):
@@ -146,13 +178,39 @@ def _pressed_modifier_names(user32):
     )
 
 
-def _focused_control(user32):
+def _foreground_thread_info(user32):
     user32.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO))
     user32.GetGUIThreadInfo.restype = wintypes.BOOL
     target = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
     if user32.GetGUIThreadInfo(0, ctypes.byref(target)):
-        return target.hwndFocus
+        return target
     return None
+
+
+def _focused_control(user32):
+    info = _foreground_thread_info(user32)
+    return info.hwndFocus if info else None
+
+
+def current_insertion_target():
+    info = _foreground_thread_info(ctypes.WinDLL("user32", use_last_error=True))
+    if info and info.hwndActive and info.hwndFocus:
+        return InsertionTarget(info.hwndActive, info.hwndFocus)
+    return None
+
+
+def restore_tray_insertion_target(target, tray_window):
+    """Return ownership to the menu's original window when the tray took focus."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    foreground = user32.GetForegroundWindow()
+    if foreground == target.window:
+        return True
+    if foreground != tray_window:
+        return False
+    user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    return bool(user32.SetForegroundWindow(target.window))
 
 
 def _read_insert_context():

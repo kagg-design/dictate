@@ -298,7 +298,9 @@ def main():
     hotkey_manager = HotkeyManager(
         on_trigger_start, on_trigger_stop, on_cancel=on_trigger_cancel,
         on_copy=lambda: tray_app.copy_latest(),
+        on_insert=lambda: tray_app.insert_latest(),
         shortcut=config["hotkey"], mode=config["hotkey_mode"], escape_cancels=config["escape_cancels"],
+        insert_last_shortcut=config["insert_last_shortcut"],
     )
 
     # 5. Define app cleanup callback
@@ -328,11 +330,16 @@ def main():
         save_wav=config["save_wav"] is True,
         wav_retention_days=config["wav_retention_days"],
         live_preview=config["live_preview"] is True,
+        recording_sounds=config["recording_sounds"] is not False,
         use_cursor_context=config["use_cursor_context"] is not False,
         text_replacements=config["text_replacements"],
         fuzzy_replacements=config["fuzzy_replacements"],
     )
-    desktop.start(tray_app, appearance=config["appearance"])
+    desktop.start(
+        tray_app, appearance=config["appearance"], window_position=config["window_position"],
+        window_page=config["window_page"], replacements_window_position=config["replacements_window_position"],
+        collapsed_settings_sections=config["collapsed_settings_sections"],
+    )
 
     def diagnostic_state():
         # Read Python-owned state only; do not call Tk or the audio/GPU drivers

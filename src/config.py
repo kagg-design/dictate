@@ -5,15 +5,18 @@ from tempfile import NamedTemporaryFile
 import yaml
 from src.logger import logger
 from src.paths import DATA_DIR, IS_INSTALLED
+from src.shortcuts import DEFAULT_INSERT_LAST_SHORTCUT, DEFAULT_SHORTCUT
 
 DEFAULT_CONFIG_PATH = DATA_DIR / "config.yaml"
 _config_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
-    "hotkey": "ctrl+win",
+    "hotkey": DEFAULT_SHORTCUT,
     "hotkey_mode": "hold",
+    "insert_last_shortcut": DEFAULT_INSERT_LAST_SHORTCUT,
     "escape_cancels": True,
     "live_preview": False,
+    "recording_sounds": True,
     "use_cursor_context": True,
     "text_replacements": {},
     "fuzzy_replacements": [],
@@ -22,6 +25,10 @@ DEFAULT_CONFIG = {
     "save_wav": False,
     "wav_retention_days": 0,
     "appearance": "System",
+    "window_position": None,
+    "replacements_window_position": None,
+    "window_page": "History",
+    "collapsed_settings_sections": [],
     "model_name": "large-v3-turbo",
     "device": "auto" if IS_INSTALLED else "cuda",
     "compute_type": "float16",

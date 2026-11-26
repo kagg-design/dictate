@@ -20,7 +20,8 @@ import sys
 import tkinter as tk
 from tkinter import font
 
-from src.desktop_theme import bundled_inter
+from src.recording_cues import RECORDING_CUES
+from src.desktop_theme import DesktopStyles
 from src.config import DEFAULT_CONFIG
 from src.paths import IS_INSTALLED
 from src.recorder import list_microphones
@@ -29,14 +30,15 @@ from src.tray import SystemTrayApp
 
 assert IS_INSTALLED and DEFAULT_CONFIG['device'] == 'auto'
 assert sys.version_info[:2] == (3, 12)
-with bundled_inter():
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        assert font.Font(root=root, family='Inter').actual('family') == 'Inter'
-    finally:
-        root.destroy()
-print('Packaged Python, application imports, Tk, and Inter verified.')
+assert all(path.is_file() for path in RECORDING_CUES.values())
+root = tk.Tk()
+root.withdraw()
+try:
+    styles = DesktopStyles(root)
+    assert font.Font(root=root, family=styles.font).actual('family').startswith('Segoe UI')
+finally:
+    root.destroy()
+print('Packaged Python, application imports, Tk, and Windows fonts verified.')
 """
 
 
@@ -52,7 +54,7 @@ def prepare_payload(payload, version):
                  ignore=ignore_patterns("*.pdb", "__pycache__", "site-packages", "test"))
 
     copytree(PROJECT / "src", payload / "src", ignore=ignore_patterns("__pycache__"))
-    copytree(PROJECT / "assets" / "fonts" / "inter", payload / "assets" / "fonts" / "inter")
+    copytree(PROJECT / "assets" / "sounds", payload / "assets" / "sounds")
     copy2(PROJECT / "icon.ico", payload)
     copy2(PACKAGING / "requirements-cuda.txt", payload)
     (payload / "dictate-installed.txt").write_text(version + "\n", encoding="utf-8")

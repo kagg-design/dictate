@@ -14,7 +14,7 @@ class RollingTranscriptionTests(unittest.TestCase):
         engine.transcribe.return_value = ending
         audio = np.full(24000, 1, dtype=np.int16)
         live = LiveTranscription(16000, rolling=True)
-        live._find_pause = Mock(return_value=20000)
+        live._find_pause = Mock(return_value=(20000, 16800))
         live.feed([audio], engine)
 
         self.assertEqual(live.finish(audio, engine), ending)
@@ -121,3 +121,88 @@ class RollingTranscriptionTests(unittest.TestCase):
         np.testing.assert_array_equal(engine.transcribe_words.call_args.args[0], source)
         self.assertEqual(live.finish(source, engine), "First sentence.")
         engine.transcribe.assert_not_called()
+
+class WhisperPreviewTests(unittest.TestCase):
+    def test_empty_phrase_decode_keeps_the_start_for_the_final_pass(self):
+        engine = Mock()
+        engine.transcribe_chunk.return_value = ""
+        engine.transcribe.return_value = "Opening and ending."
+        live = LiveTranscription(16000)
+        live._find_pause = Mock(return_value=(22000, 18800))
+        audio = np.ones(60000, dtype=np.int16)
+        live.feed([audio[:30000]], engine)
+        live.feed([audio[30000:]], engine)
+
+        self.assertEqual(live.finish(audio, engine), "Opening and ending.")
+        engine.transcribe.assert_called_once_with(audio)
+        engine.transcribe_chunk.assert_called_once()
+
+    def test_retries_a_truncated_final_using_the_original_audio(self):
+        engine = Mock()
+        engine.transcribe_preview.side_effect = ["Вот начало фразы.", "А это её окончание."]
+        engine.transcribe.return_value = "Окончание."
+        engine.transcribe_unfiltered.return_value = "Вот начало фразы, а это её окончание."
+        live = LiveTranscription(16000, show_preview=True)
+        live._find_pause = Mock(side_effect=lambda samples, _: (None, samples))
+        audio = np.ones(110720, dtype=np.int16)
+        live.feed([audio[:24000]], engine)
+        live.feed([audio[24000:]], engine)
+
+        self.assertEqual(live.finish(audio, engine), "Вот начало фразы, а это её окончание.")
+        engine.transcribe_unfiltered.assert_called_once_with(audio)
+
+    def test_retry_keeps_the_regular_result_when_the_alternative_loses_the_ending(self):
+        engine = Mock()
+        engine.transcribe_preview.return_value = "Вот начало фразы."
+        engine.transcribe.return_value = "Другое окончание."
+        engine.transcribe_unfiltered.return_value = "Вот начало фразы, а дальше всё иначе."
+        live = LiveTranscription(16000, show_preview=True)
+        live._find_pause = Mock(return_value=(None, 24000))
+        audio = np.ones(36000, dtype=np.int16)
+        live.feed([audio[:24000]], engine)
+
+        self.assertEqual(live.finish(audio, engine), "Другое окончание.")
+        engine.transcribe_unfiltered.assert_called_once_with(audio)
+
+    def test_preview_updates_during_speech_and_does_not_supply_the_final_text(self):
+        engine = Mock()
+        engine.transcribe_preview.side_effect = ["First draft", "Updated draft", "Recent words"]
+        engine.transcribe.return_value = "Final transcript"
+        live = LiveTranscription(16000, show_preview=True)
+        # Continuous speech advances the detected end without yielding a pause.
+        live._find_pause = Mock(side_effect=lambda samples, _: (None, samples))
+        audio = np.ones(88000, dtype=np.int16)
+        live.feed([audio[:20000]], engine)
+        self.assertEqual(live.preview(), "")
+        live.feed([audio[20000:24000]], engine)
+        self.assertEqual(live.preview(), "First draft")
+        live.feed([audio[24000:46500]], engine)
+        self.assertEqual(live.preview(), "Updated draft")
+        live.feed([audio[46500:70000]], engine)
+        self.assertEqual(live.preview(), "Recent words")
+        self.assertEqual(len(engine.transcribe_preview.call_args.args[0]), 64000)
+        self.assertEqual(live.finish(audio, engine), "Final transcript")
+        engine.transcribe.assert_called_once_with(audio)
+
+    def test_preview_resumes_after_a_committed_phrase(self):
+        engine = Mock(clean_text=str.strip)
+        engine.transcribe_preview.side_effect = ["Provisional", "Next phrase"]
+        engine.transcribe_chunk.side_effect = ["Committed.", "Final next phrase."]
+        live = LiveTranscription(16000, show_preview=True)
+        live._find_pause = Mock(side_effect=[(None, 24000), (28000, 24800), (None, 24000)])
+        audio = np.ones(60000, dtype=np.int16)
+        live.feed([audio[:24000]], engine)
+        self.assertEqual(live.preview(), "Provisional")
+        live.feed([audio[24000:32000]], engine)
+        self.assertEqual(live.preview(), "Committed.")
+        live.feed([audio[32000:52000]], engine)
+        self.assertEqual(live.preview(), "Committed. Next phrase")
+        self.assertEqual(live.finish(audio, engine), "Committed. Final next phrase.")
+
+    def test_no_draft_after_release_or_with_preview_disabled(self):
+        for show_preview in (True, False):
+            live = LiveTranscription(16000, show_preview=show_preview)
+            live._find_pause = Mock(return_value=(None, 25000))
+            engine = Mock()
+            live.feed([np.ones(25000, dtype=np.int16)], engine, preview_active=lambda: not show_preview)
+            engine.transcribe_preview.assert_not_called()

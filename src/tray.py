@@ -3,13 +3,15 @@ import threading
 from dataclasses import dataclass
 from PIL import Image, ImageDraw
 import pystray
+from pystray._util.win32 import WM_RBUTTONUP
 from src.logger import logger
-from src.inserter import paste_text
+from src.inserter import InsertionTarget, current_insertion_target, paste_text, restore_tray_insertion_target
 from src.clipboard import copy_text
 from src.history import DictationHistory
 from src.config import save_recognition_model, save_settings
 from src.live_transcription import CompletedCapture, LiveTranscription
 from src.replacements import TextReplacements
+from src.shortcuts import validate_shortcuts
 
 
 REFRESH_HISTORY_MENU = object()
@@ -31,12 +33,34 @@ class PreRollSelection:
     duration: float
 
 
+@dataclass(frozen=True)
+class InsertLast:
+    text: str
+    target: InsertionTarget
+
+
+class TrayIcon(pystray.Icon):
+    menu_target = None
+
+    def _on_notify(self, wparam, lparam):
+        if lparam != WM_RBUTTONUP:
+            return super()._on_notify(wparam, lparam)
+        # pystray activates its hidden window before displaying the native menu.
+        self.menu_target = current_insertion_target()
+        try:
+            return super()._on_notify(wparam, lparam)
+        finally:
+            self.menu_target = None
+
+
 class SystemTrayApp:
     def __init__(
         self, transcriber, recorder, hotkey_manager, on_exit_callback,
         show_startup_notifications=True, history=None, models=None,
         open_window=None, save_wav=False, live_preview=False, use_cursor_context=True,
-        text_replacements=None, fuzzy_replacements=(), wav_retention_days=0,
+        text_replacements=None, recording_sounds=True,
+        fuzzy_replacements=(),
+        wav_retention_days=0,
     ):
         """
         Coordinates the system tray interface, state changes, and background tasks.
@@ -63,6 +87,7 @@ class SystemTrayApp:
         self.settings_error = ""
         self.save_wav = save_wav
         self.live_preview = live_preview
+        self.recording_sounds = recording_sounds
         self.use_cursor_context = use_cursor_context
         self.replacements = TextReplacements.from_config(text_replacements, fuzzy_replacements)
         self.preview_text = ""
@@ -88,6 +113,10 @@ class SystemTrayApp:
         self.menu = pystray.Menu(
             first_item,
             pystray.MenuItem(
+                "Insert Last Dictation", self.insert_latest,
+                enabled=lambda item: bool(self.history.recent()) and not self.dictation_busy,
+            ),
+            pystray.MenuItem(
                 "Copy Last Dictation", self.copy_latest, enabled=lambda item: bool(self.history.recent())
             ),
             pystray.Menu.SEPARATOR,
@@ -102,7 +131,7 @@ class SystemTrayApp:
         )
         
         # Setup the pystray icon
-        self.icon = pystray.Icon(
+        self.icon = TrayIcon(
             name="dictate",
             icon=self._generate_icon_image('idle'),
             title="Dictate Tool",
@@ -217,21 +246,33 @@ class SystemTrayApp:
             self.save_wav = enabled
             self.settings_error = ""
 
-    def set_dictation_preferences(self, *, shortcut, mode, escape_cancels, live_preview, use_cursor_context):
+    def set_dictation_preferences(
+        self, *, shortcut, mode, insert_last_shortcut, escape_cancels, live_preview, recording_sounds, use_cursor_context
+    ):
         with self._capture_lock:
             if self.settings_busy or self.hotkey_manager.is_active:
                 return
             try:
+                validate_shortcuts(shortcut, insert_last_shortcut)
+            except ValueError as exc:
+                self.settings_error = str(exc)
+                return
+            try:
                 save_settings({
-                    "hotkey": shortcut, "hotkey_mode": mode, "escape_cancels": escape_cancels,
+                    "hotkey": shortcut.to_setting(), "hotkey_mode": mode, "escape_cancels": escape_cancels,
+                    "insert_last_shortcut": insert_last_shortcut.to_setting() if insert_last_shortcut else "off",
                     "live_preview": live_preview, "use_cursor_context": use_cursor_context,
+                    "recording_sounds": recording_sounds,
                 })
             except Exception as exc:
                 self.settings_error = f"Could not save dictation settings. {exc}"
                 logger.exception("Failed to save dictation settings")
             else:
-                self.hotkey_manager.configure(shortcut, mode, escape_cancels)
+                self.hotkey_manager.configure(
+                    shortcut, mode, escape_cancels, insert_last_shortcut=insert_last_shortcut,
+                )
                 self.live_preview = live_preview
+                self.recording_sounds = recording_sounds
                 self.use_cursor_context = use_cursor_context
                 self.settings_error = ""
 
@@ -271,7 +312,8 @@ class SystemTrayApp:
                 return False
 
             capture = LiveTranscription(
-                self.recorder.sample_rate, rolling=self.model_name == "fluid-speech-mini"
+                self.recorder.sample_rate, rolling=self.model_name == "fluid-speech-mini",
+                show_preview=self.live_preview,
             )
 
             def show_recording():
@@ -318,17 +360,31 @@ class SystemTrayApp:
                 return
             blocks = self.recorder.recorded_blocks_from(capture.blocks_seen)
         self.recorder.check_capture_input()
-        capture.feed(blocks, self.transcriber)
+        capture.feed(blocks, self.transcriber, preview_active=lambda: self._capture is capture)
         if self.live_preview and blocks:
             preview = capture.preview()
             with self._capture_lock:
                 if self._capture is capture:
+                    if preview and not self.preview_text:
+                        logger.info("First live transcript ready.")
                     self.preview_text = preview
 
     def copy_latest(self, icon=None, item=None):
         entries = self.history.recent()
         if entries:
             self._copy_history_action(entries[0])(icon, item)
+
+    def insert_latest(self, icon=None, item=None):
+        with self._capture_lock:
+            if not self.running or self.dictation_busy:
+                return
+            entries = self.history.recent()
+            if not entries:
+                return
+            target = current_insertion_target() if icon is None else icon.menu_target
+            if target is None or (icon is not None and not restore_tray_insertion_target(target, icon._hwnd)):
+                return
+            self.task_queue.put(InsertLast(entries[0].text, target))
 
     def _history_menu_items(self):
         entries = self.history.recent()
@@ -510,6 +566,11 @@ class SystemTrayApp:
                         self._change_microphone(task)
                     elif isinstance(task, PreRollSelection):
                         self._change_pre_roll(task)
+                    elif isinstance(task, InsertLast):
+                        try:
+                            paste_text(task.text, use_cursor_context=self.use_cursor_context, target=task.target)
+                        except Exception:
+                            logger.exception("Could not insert the last dictation")
                     else:
                         self._deliver_transcript(task)
                 finally:

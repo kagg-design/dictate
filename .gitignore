@@ -20,6 +20,8 @@ logs/
 
 # Audio scratch files
 *.wav
+!assets/sounds/recording-start.wav
+!assets/sounds/recording-stop.wav
 *.mp3
 
 # Standard streams redirection logs

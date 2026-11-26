@@ -10,6 +10,7 @@ import yaml
 
 from src.config import save_recognition_model, save_settings
 from src.history import DictationHistory
+from src.inserter import InsertionTarget
 from src.live_transcription import CompletedCapture
 from src.recorder import AudioRecorder
 from src.replacements import TextReplacements
@@ -23,7 +24,7 @@ class TrayHistoryTests(unittest.TestCase):
         self.path = Path(folder.name) / "dictation-history.json"
         self.history = DictationHistory(self.path)
         self.transcriber = Mock()
-        with patch("src.tray.pystray.Icon"):
+        with patch("src.tray.TrayIcon"):
             self.app = SystemTrayApp(
                 self.transcriber, Mock(), Mock(), None, history=self.history,
             )
@@ -81,9 +82,38 @@ class TrayHistoryTests(unittest.TestCase):
             self.app.copy_latest()
         copy.assert_called_once_with("most recent", 123)
 
+    def test_insert_last_uses_direct_insertion_and_keeps_history_and_clipboard(self):
+        target = InsertionTarget(40, 41)
+        self.history.add("old")
+        self.history.add("most recent")
+        with (
+            patch("src.tray.current_insertion_target", return_value=target),
+            patch("src.tray.paste_text") as paste,
+            patch("src.tray.copy_text") as copy,
+        ):
+            self.app.insert_latest()
+            self.app.task_queue.put(None)
+            self.app._worker_loop()
+        paste.assert_called_once_with("most recent", use_cursor_context=True, target=target)
+        copy.assert_not_called()
+        self.assertEqual([entry.text for entry in self.history.recent()], ["most recent", "old"])
+
+    def test_insert_last_menu_targets_the_editor_that_preceded_the_popup(self):
+        insert_item = next(item for item in self.app.menu if item.text == "Insert Last Dictation")
+        self.assertFalse(insert_item.enabled)
+        self.history.add("my saved text")
+        target = self.app.icon.menu_target = InsertionTarget(40, 41)
+        with patch("src.tray.restore_tray_insertion_target", return_value=False) as restore:
+            insert_item(self.app.icon)
+            self.assertTrue(self.app.task_queue.empty())
+            restore.return_value = True
+            insert_item(self.app.icon)
+        restore.assert_called_with(target, 123)
+        self.assertEqual(self.app.task_queue.get_nowait().target, target)
+
     def test_left_click_opens_the_desktop_window(self):
         open_window = Mock()
-        with patch("src.tray.pystray.Icon"):
+        with patch("src.tray.TrayIcon"):
             app = SystemTrayApp(Mock(), Mock(), Mock(), None, history=self.history, open_window=open_window)
         app.menu(app.icon)
         open_window.assert_called_once()
