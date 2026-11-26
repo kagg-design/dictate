@@ -402,6 +402,16 @@ class DictateWindow:
             )
         ]
 
+        processing = canvas.add_section("postprocessing", "Local post-processing")
+        row = self._settings_row(processing, "Ollama model", "Enter the name of an installed local model.")
+        self.ollama_model = ttk.Entry(row, width=24)
+        self.ollama_model.insert(0, self.app.postprocess_model)
+        self.ollama_model.pack(side="left")
+        self.save_ollama = ttk.Button(row, text="Save", style="Settings.TButton", command=self._save_postprocessing)
+        self.save_ollama.pack(side="left", padx=(4, 0))
+        self.postprocess_button = self._shortcut_button(processing, "Dictate with editing", "postprocess_shortcut")
+        self.settings_canvas.add_row(processing, "Press the editing shortcut once to start and again to finish.")
+
         history = canvas.add_section("history", "History and startup")
         self.save_audio = tk.BooleanVar(self.window)
         self.wav_option = self._settings_switch(
@@ -627,11 +637,15 @@ class DictateWindow:
         button = ttk.Button(
             row, style="Shortcut.Settings.TButton", width=19, command=lambda: self._capture_shortcut(slot)
         )
-        if slot == "insert_last_shortcut":
-            self.disable_insert_last = ttk.Button(
+        if slot != "shortcut":
+            disable = ttk.Button(
                 row, text="Turn off", style="Settings.TButton", command=lambda: self._save_shortcut(slot, None)
             )
-            self.disable_insert_last.pack(side="right", padx=(4, 0))
+            disable.pack(side="right", padx=(4, 0))
+            if slot == "insert_last_shortcut":
+                self.disable_insert_last = disable
+            else:
+                self.disable_postprocess = disable
         button.pack(side="right")
         return button
 
@@ -657,7 +671,15 @@ class DictateWindow:
 
     def _save_shortcut(self, slot, binding):
         self._cancel_shortcut_capture()
-        self._save_dictation_preferences(**{slot: binding})
+        if slot == "postprocess_shortcut":
+            self.app.set_postprocessing(self.ollama_model.get(), binding)
+            self._refresh_settings(force=True)
+        else:
+            self._save_dictation_preferences(**{slot: binding})
+
+    def _save_postprocessing(self):
+        self.app.set_postprocessing(self.ollama_model.get(), self.app.hotkey_manager.postprocess_shortcut)
+        self._refresh_settings(force=True)
 
     def _poll_shortcut_capture(self):
         if self._shortcut_capture is None:
@@ -849,6 +871,7 @@ class DictateWindow:
         snapshot = (
             busy, notice, kind, recorder.microphone, self.app.model_name, device, self.app.save_wav, pre_roll_ms,
             hotkeys.shortcut, hotkeys.mode, hotkeys.insert_last_shortcut, hotkeys.escape_cancels,
+            hotkeys.postprocess_shortcut, self.app.postprocess_model,
             self.app.live_preview, self.app.recording_sounds, self.app.use_cursor_context,
         )
         if not force and snapshot == self._settings_snapshot:
@@ -874,6 +897,7 @@ class DictateWindow:
         for slot, button, binding in (
             ("shortcut", self.shortcut_button, hotkeys.shortcut),
             ("insert_last_shortcut", self.insert_last_button, hotkeys.insert_last_shortcut),
+            ("postprocess_shortcut", self.postprocess_button, hotkeys.postprocess_shortcut),
         ):
             button.configure(
                 text="Press 2 or 3 keys…" if capture_slot == slot else (binding.label if binding else "Off"),
@@ -882,6 +906,11 @@ class DictateWindow:
         self.disable_insert_last.configure(
             state="disabled" if busy or capture_slot is not None or hotkeys.insert_last_shortcut is None else "normal"
         )
+        self.disable_postprocess.configure(
+            state="disabled" if busy or capture_slot is not None or hotkeys.postprocess_shortcut is None else "normal"
+        )
+        self.ollama_model.configure(state="disabled" if busy else "normal")
+        self.save_ollama.configure(state="disabled" if busy else "normal")
         for option in self.dictation_options:
             option.configure(state="disabled" if busy else "normal")
         self.escape_cancels.set(hotkeys.escape_cancels)

@@ -84,13 +84,15 @@ private struct DictateMenu: View {
 
 @MainActor
 final class DictateState: ObservableObject {
-    enum ShortcutSlot: Equatable { case dictation, insertLast }
+    enum ShortcutSlot: Equatable { case dictation, insertLast, postprocess }
 
     @Published private(set) var selectedModel: SpeechModel
     @Published private(set) var preRoll: Int
     @Published private(set) var saveWav: Bool
     @Published private(set) var shortcutChoice: ShortcutBinding
     @Published private(set) var insertLastShortcut: ShortcutBinding? = nil
+    @Published private(set) var postprocessShortcut: ShortcutBinding? = nil
+    @Published private(set) var postprocessModel = ""
     @Published private(set) var capturingShortcut: ShortcutSlot? = nil
     @Published private(set) var shortcutError = ""
     @Published private(set) var toggleMode: Bool
@@ -128,12 +130,16 @@ final class DictateState: ObservableObject {
         let target = InsertionTarget()
         let date = Date()
         let model: SpeechModel
+        let postprocessModel: String
         var consumed = 0
         var attempted = 0
         var parts = [String]()
         var pending: Task<Void, Never>?
 
-        init(model: SpeechModel) { self.model = model }
+        init(model: SpeechModel, postprocessModel: String) {
+            self.model = model
+            self.postprocessModel = postprocessModel
+        }
     }
 
     var busy: Bool { loading || recording || finishing }
@@ -156,6 +162,12 @@ final class DictateState: ObservableObject {
             }
         }
         toggleMode = defaults.bool(forKey: "toggleMode")
+        postprocessModel = defaults.string(forKey: "postprocessModel") ?? ""
+        if let saved = ShortcutBinding.decode(defaults.data(forKey: "postprocessShortcutBinding")), saved.key != nil,
+           !saved.conflicts(with: dictation), !saved.conflicts(with: .copyLast),
+           insertLastShortcut.map({ !saved.conflicts(with: $0) }) ?? true {
+            postprocessShortcut = saved
+        }
         escapeCancels = defaults.object(forKey: "escapeCancels") as? Bool ?? true
         livePreview = defaults.bool(forKey: "livePreview")
         recordingSounds = defaults.object(forKey: "recordingSounds") as? Bool ?? true
@@ -179,12 +191,14 @@ final class DictateState: ObservableObject {
         }
         shortcut.choice = shortcutChoice
         shortcut.insertLast = insertLastShortcut
+        shortcut.postprocess = postprocessShortcut
         shortcut.toggle = toggleMode
         shortcut.escapeCancels = escapeCancels
         shortcut.changed = { [weak self] action in
             DispatchQueue.main.async {
                 switch action {
                 case .start: self?.start()
+                case .startWithPostprocessing: self?.start(postprocess: true)
                 case .finish: self?.finish()
                 case .cancel: self?.finish(insert: false)
                 case .copy: self?.copyLatest()
@@ -296,29 +310,54 @@ final class DictateState: ObservableObject {
         UserDefaults.standard.set(true, forKey: "insertLastShortcutDisabled")
     }
 
+    func setPostprocessModel(_ value: String) {
+        postprocessModel = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(postprocessModel, forKey: "postprocessModel")
+    }
+
+    func disablePostprocessShortcut() {
+        postprocessShortcut = nil
+        shortcut.postprocess = nil
+        shortcutError = ""
+        UserDefaults.standard.removeObject(forKey: "postprocessShortcutBinding")
+    }
+
     private func saveShortcut(_ binding: ShortcutBinding, slot: ShortcutSlot) {
         guard !binding.conflicts(with: .copyLast) else {
             shortcutError = "Control + Command + V is assigned to Copy Last Dictation."
             return
         }
-        let other = slot == .dictation ? insertLastShortcut : shortcutChoice
-        guard other.map({ !binding.conflicts(with: $0) }) ?? true else {
-            shortcutError = "Choose distinct shortcuts for dictation and Insert Last Dictation."
+        let bindings: [(ShortcutSlot, ShortcutBinding?)] = [
+            (.dictation, shortcutChoice), (.insertLast, insertLastShortcut), (.postprocess, postprocessShortcut),
+        ]
+        guard !bindings.contains(where: { key, other in
+            key != slot && (other.map { binding.conflicts(with: $0) } ?? false)
+        }) else {
+            shortcutError = "Choose distinct shortcuts for dictation, insertion and post-processing."
+            return
+        }
+        if slot == .postprocess && binding.key == nil {
+            shortcutError = "Include a non-modifier key in the post-processing shortcut."
             return
         }
         guard let data = try? JSONEncoder().encode(binding) else {
             shortcutError = "Could not save the shortcut."
             return
         }
-        if slot == .dictation {
+        switch slot {
+        case .dictation:
             UserDefaults.standard.set(data, forKey: "dictationShortcutBinding")
             shortcutChoice = binding
             shortcut.choice = binding
-        } else {
+        case .insertLast:
             UserDefaults.standard.set(data, forKey: "insertLastShortcutBinding")
             UserDefaults.standard.set(false, forKey: "insertLastShortcutDisabled")
             insertLastShortcut = binding
             shortcut.insertLast = binding
+        case .postprocess:
+            UserDefaults.standard.set(data, forKey: "postprocessShortcutBinding")
+            postprocessShortcut = binding
+            shortcut.postprocess = binding
         }
     }
 
@@ -472,8 +511,13 @@ final class DictateState: ObservableObject {
         }
     }
 
-    private func start() {
+    private func start(postprocess: Bool = false) {
         guard !busy else { shortcut.disarm(); return }
+        if postprocess && postprocessModel.isEmpty {
+            shortcut.disarm()
+            status = "Enter a local Ollama model in Dictate Settings."
+            return
+        }
         guard microphoneAllowed else {
             shortcut.disarm()
             status = "Allow microphone access in Dictate settings."
@@ -485,7 +529,7 @@ final class DictateState: ObservableObject {
             return
         }
         do {
-            let session = Session(model: selectedModel)
+            let session = Session(model: selectedModel, postprocessModel: postprocess ? postprocessModel : "")
             try recorder.start()
             self.session = session
             recording = true
@@ -556,8 +600,13 @@ final class DictateState: ObservableObject {
                     let tail = try await engine.transcribe(Array(samples.dropFirst(session.consumed)))
                     if !tail.isEmpty { session.parts.append(tail) }
                 }
-                let full = replacements.apply(session.parts.joined(separator: " "))
+                var full = replacements.apply(session.parts.joined(separator: " "))
                 guard !full.isEmpty else { status = interrupted ? "Microphone stopped responding." : "No speech recognized."; return }
+                var polishFailed = false
+                if insert, !session.postprocessModel.isEmpty {
+                    do { full = try await Postprocess.polish(full, model: session.postprocessModel) }
+                    catch { polishFailed = true }
+                }
                 let id = UUID()
                 let audioFile = keepWav ? try? DictateFiles.saveAudio(samples, id: id) : nil
                 let entry = HistoryEntry(id: id, date: session.date, model: session.model.label, text: full, audioFile: audioFile)
@@ -574,6 +623,9 @@ final class DictateState: ObservableObject {
                     status = "Insertion canceled. Text available in History."
                 } else if interrupted {
                     status = "Microphone interrupted. Check the transcript in History."
+                } else if polishFailed {
+                    status = inserted ? "Local editing failed. Inserted the recognized text."
+                        : "Local editing failed. The recognized text is in History."
                 } else {
                     status = inserted ? "Ready to dictate" : "Text available in History. Check Accessibility and the focused field."
                 }
@@ -646,6 +698,19 @@ private struct DictateWindow: View {
                        isOn: Binding(get: { state.recordingSounds }, set: state.setRecordingSounds))
                 Toggle("Use text around the cursor",
                        isOn: Binding(get: { state.useCursorContext }, set: state.setUseCursorContext))
+            }
+            .disabled(state.busy)
+            Section("Local post-processing") {
+                PostprocessSettings(state: state)
+                LabeledContent("Dictate with editing") {
+                    if state.postprocessShortcut != nil {
+                        Button("Turn off", action: state.disablePostprocessShortcut)
+                            .disabled(state.capturingShortcut != nil)
+                    }
+                    shortcutButton(.postprocess, label: state.postprocessShortcut?.label ?? "Off")
+                }
+                Text("Press the editing shortcut once to start and again to finish.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
             .disabled(state.busy)
             Section("Microphone and history") {
@@ -731,6 +796,22 @@ private struct DictateWindow: View {
             if enabled { Text("Granted").foregroundStyle(.secondary) }
             else { Button("Allow", action: request) }
         }
+    }
+}
+
+private struct PostprocessSettings: View {
+    let state: DictateState
+    @State private var model = ""
+
+    var body: some View {
+        LabeledContent("Ollama model") {
+            TextField("Installed model name", text: $model)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { state.setPostprocessModel(model) }
+            Button("Save") { state.setPostprocessModel(model) }
+                .disabled(model == state.postprocessModel)
+        }
+        .onAppear { model = state.postprocessModel }
     }
 }
 

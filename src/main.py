@@ -265,11 +265,12 @@ def main():
         tray_app.set_state('recording')
         desktop.set_recording(True)
 
-    def on_trigger_start():
+    def on_trigger_start(*, postprocess=False):
         try:
             return tray_app.start_capture(
                 on_limit_reached=on_limit_reached,
                 on_audio_start=on_audio_start,
+                postprocess=postprocess,
             )
         except Exception as e:
             logger.error(f"Failed to start recording: {e}")
@@ -299,6 +300,8 @@ def main():
         on_trigger_start, on_trigger_stop, on_cancel=on_trigger_cancel,
         on_copy=lambda: tray_app.copy_latest(),
         on_insert=lambda: tray_app.insert_latest(),
+        on_postprocess_start=lambda: on_trigger_start(postprocess=True),
+        postprocess_shortcut=config["postprocess_shortcut"],
         shortcut=config["hotkey"], mode=config["hotkey_mode"], escape_cancels=config["escape_cancels"],
         insert_last_shortcut=config["insert_last_shortcut"],
     )
@@ -334,6 +337,7 @@ def main():
         use_cursor_context=config["use_cursor_context"] is not False,
         text_replacements=config["text_replacements"],
         fuzzy_replacements=config["fuzzy_replacements"],
+        postprocess_model=config["postprocess_model"],
     )
     desktop.start(
         tray_app, appearance=config["appearance"], window_position=config["window_position"],

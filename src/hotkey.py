@@ -18,15 +18,21 @@ MODES = {"hold": "Hold to dictate", "toggle": "Press to start / stop"}
 KEEP_INSERT_SHORTCUT = object()
 
 
+def validate_postprocess_shortcut(binding, dictation, insert_last):
+    if binding and (binding.key is None or any(binding.conflicts(other) for other in (dictation, insert_last, COPY_LAST))):
+        raise ValueError("Choose a separate post-processing shortcut with a non-modifier key.")
+
+
 class HotkeyManager:
     def __init__(self, on_trigger_start, on_trigger_stop, *, on_cancel=None, on_copy=None, on_insert=None,
                  shortcut=DEFAULT_SHORTCUT, mode="hold", escape_cancels=True,
-                 insert_last_shortcut=DEFAULT_INSERT_LAST_SHORTCUT):
+                 insert_last_shortcut=DEFAULT_INSERT_LAST_SHORTCUT, on_postprocess_start=None, postprocess_shortcut=None):
         self.on_trigger_start = on_trigger_start
         self.on_trigger_stop = on_trigger_stop
         self.on_cancel = on_cancel
         self.on_copy = on_copy
         self.on_insert = on_insert
+        self.on_postprocess_start = on_postprocess_start
         self.shortcut = load_shortcut(shortcut, DICTATION_DEFAULT)
         self.mode = mode if isinstance(mode, str) and mode in MODES else "hold"
         self.escape_cancels = escape_cancels
@@ -40,6 +46,12 @@ class HotkeyManager:
             if self.shortcut == COPY_LAST:
                 self.shortcut = DICTATION_DEFAULT
             self.insert_last_shortcut = None
+        self.postprocess_shortcut = load_shortcut(postprocess_shortcut, None)
+        try:
+            validate_postprocess_shortcut(self.postprocess_shortcut, self.shortcut, self.insert_last_shortcut)
+        except ValueError:
+            self.postprocess_shortcut = None
+        self._postprocessing_active = False
         self.is_active = False
         self.paused = False
         self._pressed = {}
@@ -79,6 +91,10 @@ class HotkeyManager:
             self._toggle_armed = self._insert_armed = False
             return True
 
+    def configure_postprocessing(self, binding):
+        with self._state_lock:
+            self.postprocess_shortcut = binding
+
     def cancel_capture(self):
         with self._state_lock:
             self._capture = None
@@ -105,6 +121,7 @@ class HotkeyManager:
             self._pressed.clear()
             self._suppressed.clear()
             self.is_active = self._chord_down = self._toggle_armed = self._insert_armed = False
+            self._postprocessing_active = False
             self._capture = None
 
     def set_paused(self, paused):
@@ -113,6 +130,7 @@ class HotkeyManager:
             stop = paused and self.is_active
             if stop:
                 self.is_active = False
+                self._postprocessing_active = False
             self._toggle_armed = False
         if stop:
             self._schedule(self.on_trigger_stop)
@@ -122,6 +140,7 @@ class HotkeyManager:
         with self._state_lock:
             self.is_active = False
             self._toggle_armed = False
+            self._postprocessing_active = False
 
     def _matches(self, shortcut, modifiers):
         return shortcut.modifiers == modifiers and (shortcut.key is None or shortcut.key in self._pressed)
@@ -204,15 +223,28 @@ class HotkeyManager:
                 and self.on_copy is not None
             )
             inserting = self._insert_triggered(down, repeat, key, name, modifiers)
+            post = self.postprocess_shortcut
+            processing = (
+                post is not None and self.on_postprocess_start is not None and not self.paused
+                and down and not repeat and key == post.key and modifiers == post.modifiers
+                and (not self.is_active or self._postprocessing_active)
+            )
             activating = (
                 self._chord_down and not previous and down and not repeat and not self.paused
+                and not self._postprocessing_active
                 and (self.shortcut.key is None or key == self.shortcut.key)
             )
 
-            if copying:
+            if processing:
+                consume = True
+                self.is_active = not self.is_active
+                self._postprocessing_active = self.is_active
+                self._toggle_armed = False
+                actions.append((self.on_postprocess_start if self.is_active else self.on_trigger_stop, ()))
+            elif copying:
                 consume = True
                 self._toggle_armed = False
-                if (self.is_active and self.shortcut == DICTATION_DEFAULT and self.mode == "hold"
+                if (self.is_active and not self._postprocessing_active and self.shortcut == DICTATION_DEFAULT and self.mode == "hold"
                         and monotonic() - self._hold_started < 0.35):
                     self.is_active = False
                     actions.append((self.on_cancel, (False,)))
@@ -224,8 +256,9 @@ class HotkeyManager:
                   and self.escape_cancels and self.is_active and self.on_cancel):
                 consume = True
                 self.is_active = self._toggle_armed = False
+                self._postprocessing_active = False
                 actions.append((self.on_cancel, (True,)))
-            elif not self.paused:
+            elif not self.paused and not self._postprocessing_active:
                 if activating:
                     consume |= self.shortcut.key is not None
                     if self.mode == "toggle" and self.shortcut.key is None:
@@ -255,7 +288,7 @@ class HotkeyManager:
                 self._suppressed.add(key)
             elif not down:
                 self._suppressed.discard(key)
-            mask_menu = (copying or inserting or activating or self._insert_armed) and any(
+            mask_menu = (copying or inserting or activating or processing or self._insert_armed) and any(
                 pressed_name == "win" and pressed_key not in self._suppressed
                 for pressed_key, pressed_name in self._pressed.items()
             )
@@ -285,7 +318,7 @@ class HotkeyManager:
     def _invoke(self, callback, args):
         try:
             result = callback(*args)
-            if callback is self.on_trigger_start and result is False:
+            if callback in (self.on_trigger_start, self.on_postprocess_start) and result is False:
                 self.cancel_active()
         except Exception:
             logger.exception("Dictate shortcut failed")

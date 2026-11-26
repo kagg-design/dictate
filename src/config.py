@@ -20,6 +20,8 @@ DEFAULT_CONFIG = {
     "use_cursor_context": True,
     "text_replacements": {},
     "fuzzy_replacements": [],
+    "postprocess_model": "",
+    "postprocess_shortcut": None,
     "recognition_model": "whisper",
     "microphone": None,
     "save_wav": False,

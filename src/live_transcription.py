@@ -2,11 +2,15 @@
 
 from dataclasses import dataclass
 import re
+from typing import TYPE_CHECKING
 
 from faster_whisper.vad import get_speech_timestamps
 import numpy as np
 
 from src.logger import logger
+
+if TYPE_CHECKING:
+    from src.inserter import InsertionTarget
 
 
 def _words(text):
@@ -23,6 +27,8 @@ class CompletedCapture:
     audio: np.ndarray
     save_wav: bool = False
     insert: bool = True
+    postprocess_model: str = ""
+    target: "InsertionTarget | None" = None
 
 
 class LiveTranscription:

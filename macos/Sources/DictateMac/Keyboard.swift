@@ -87,7 +87,7 @@ struct ShortcutBinding: Codable, Equatable {
 }
 
 final class DictationShortcut {
-    enum Action { case start, finish, cancel, copy, insertLast }
+    enum Action { case start, startWithPostprocessing, finish, cancel, copy, insertLast }
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -95,6 +95,7 @@ final class DictationShortcut {
     private var keysDown = Set<Int64>()
     private var chordDown = false
     private var active = false
+    private var postprocessingActive = false
     private var suppressedKeys = Set<Int64>()
     private var insertArmed = false
     private var capture: ((ShortcutBinding?, String) -> Void)?
@@ -103,6 +104,7 @@ final class DictationShortcut {
     private var captureKeyNames: [Int64: String] = [:]
     var choice: ShortcutBinding = .dictationDefault { didSet { chordDown = false } }
     var insertLast: ShortcutBinding? = .insertLastDefault { didSet { insertArmed = false } }
+    var postprocess: ShortcutBinding?
     var toggle = false
     var escapeCancels = true
     var changed: ((Action) -> Void)?
@@ -141,7 +143,10 @@ final class DictationShortcut {
         )
     }
 
-    func disarm() { active = false }
+    func disarm() {
+        active = false
+        postprocessingActive = false
+    }
 
     func beginCapture(_ completion: @escaping (ShortcutBinding?, String) -> Void) -> Bool {
         guard installed, !active, capture == nil else { return false }
@@ -224,6 +229,15 @@ final class DictationShortcut {
         }
         let freshDown = down && event.getIntegerValueField(.keyboardEventAutorepeat) == 0
         if freshDown {
+            if let postprocess, code == postprocess.key, modifiers == postprocess.modifiers,
+               !active || postprocessingActive {
+                suppressedKeys.insert(code)
+                active.toggle()
+                postprocessingActive = active
+                chordDown = false
+                changed?(active ? .startWithPostprocessing : .finish)
+                return false
+            }
             if code == ShortcutBinding.copyLast.key && modifiers == ShortcutBinding.copyLast.modifiers {
                 suppressedKeys.insert(code)
                 changed?(.copy)
@@ -244,6 +258,7 @@ final class DictationShortcut {
                 return false
             }
         }
+        if postprocessingActive { return !suppressRelease }
         let next = modifiers == choice.modifiers && (choice.key.map { keysDown.contains($0) } ?? true)
         guard next != chordDown else { return !suppressRelease }
         chordDown = next

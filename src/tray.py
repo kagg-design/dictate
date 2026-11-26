@@ -9,8 +9,10 @@ from src.inserter import InsertionTarget, current_insertion_target, paste_text, 
 from src.clipboard import copy_text
 from src.history import DictationHistory
 from src.config import save_recognition_model, save_settings
+from src.hotkey import validate_postprocess_shortcut
 from src.live_transcription import CompletedCapture, LiveTranscription
 from src.replacements import TextReplacements
+from src.postprocess import polish
 from src.shortcuts import validate_shortcuts
 
 
@@ -61,6 +63,7 @@ class SystemTrayApp:
         text_replacements=None, recording_sounds=True,
         fuzzy_replacements=(),
         wav_retention_days=0,
+        postprocess_model="",
     ):
         """
         Coordinates the system tray interface, state changes, and background tasks.
@@ -80,6 +83,7 @@ class SystemTrayApp:
         self.model_name = None
         self._capture_lock = threading.Lock()
         self._capture = None
+        self._capture_postprocess_model = ""
         self._pending_captures = 0
         self._loading_model = False
         self._changing_microphone = False
@@ -90,6 +94,7 @@ class SystemTrayApp:
         self.recording_sounds = recording_sounds
         self.use_cursor_context = use_cursor_context
         self.replacements = TextReplacements.from_config(text_replacements, fuzzy_replacements)
+        self.postprocess_model = postprocess_model.strip() if isinstance(postprocess_model, str) else ""
         self.preview_text = ""
         
         self.state = 'idle'
@@ -254,6 +259,7 @@ class SystemTrayApp:
                 return
             try:
                 validate_shortcuts(shortcut, insert_last_shortcut)
+                validate_postprocess_shortcut(self.hotkey_manager.postprocess_shortcut, shortcut, insert_last_shortcut)
             except ValueError as exc:
                 self.settings_error = str(exc)
                 return
@@ -283,6 +289,24 @@ class SystemTrayApp:
         })
         self.replacements = replacements
 
+    def set_postprocessing(self, model, binding):
+        with self._capture_lock:
+            if self.settings_busy or self.hotkey_manager.is_active:
+                return
+            hotkeys = self.hotkey_manager
+            try:
+                validate_postprocess_shortcut(binding, hotkeys.shortcut, hotkeys.insert_last_shortcut)
+                save_settings({
+                    "postprocess_model": model.strip(),
+                    "postprocess_shortcut": binding.to_setting() if binding else None,
+                })
+            except (OSError, ValueError) as exc:
+                self.settings_error = str(exc)
+            else:
+                self.postprocess_model = model.strip()
+                hotkeys.configure_postprocessing(binding)
+                self.settings_error = ""
+
     def set_wav_retention(self, days):
         try:
             save_settings({"wav_retention_days": days})
@@ -300,9 +324,12 @@ class SystemTrayApp:
         except Exception:
             logger.exception("Failed to release the previous speech engine")
 
-    def start_capture(self, on_limit_reached, on_audio_start):
+    def start_capture(self, on_limit_reached, on_audio_start, *, postprocess=False):
         with self._capture_lock:
             if not self.running or self._capture:
+                return False
+            if postprocess and not self.postprocess_model:
+                self.show_notification("Post-Processing", "Enter a local Ollama model in Dictate Settings.")
                 return False
             if self.settings_activity or self.transcriber is None:
                 message = (
@@ -334,6 +361,7 @@ class SystemTrayApp:
             self.recorder.start(on_limit_reached=finish_at_limit, on_audio_start=show_recording)
             self.preview_text = ""
             self._capture = capture
+            self._capture_postprocess_model = self.postprocess_model if postprocess else ""
             return True
 
     def finish_capture(self, *, expected=None, insert=True, keep_in_history=True):
@@ -341,6 +369,7 @@ class SystemTrayApp:
             if self._capture is None or (expected is not None and self._capture is not expected):
                 return False
             capture, self._capture = self._capture, None
+            postprocess_model, self._capture_postprocess_model = self._capture_postprocess_model, ""
             audio = self.recorder.stop()
             self.preview_text = ""
             if self.recorder.capture_interrupted is True and keep_in_history:
@@ -350,7 +379,10 @@ class SystemTrayApp:
             else:
                 self._pending_captures += 1
                 self.set_state("transcribing")
-                self.task_queue.put(CompletedCapture(capture, audio, self.save_wav, insert=insert))
+                target = current_insertion_target() if insert and postprocess_model else None
+                self.task_queue.put(CompletedCapture(
+                    capture, audio, self.save_wav, insert=insert, postprocess_model=postprocess_model, target=target,
+                ))
             return True
 
     def _process_live_audio(self):
@@ -581,6 +613,7 @@ class SystemTrayApp:
 
     def _deliver_transcript(self, task):
         entry = None
+        postprocessing = isinstance(task, CompletedCapture) and task.insert and bool(task.postprocess_model)
         try:
             if isinstance(task, CompletedCapture):
                 text = task.live.finish(task.audio, self.transcriber)
@@ -588,11 +621,20 @@ class SystemTrayApp:
                 text = self.transcriber.transcribe(task)
             if text and self.running:
                 text = self.replacements.apply(text)
+                if postprocessing:
+                    try:
+                        text = polish(text, task.postprocess_model)
+                    except ValueError as exc:
+                        logger.info("Post-processing skipped: %s", exc)
+                        self.show_notification("Post-Processing", "Local editing failed. Using the recognized text.")
                 # Save first, so the user can recover the text if delivery fails.
                 model = self.models[self.model_name][0] if self.model_name in self.models else None
                 entry = self.history.add(text, model=model)
                 self.ui_queue.put(REFRESH_HISTORY_MENU)
-                if not isinstance(task, CompletedCapture) or task.insert:
+                if postprocessing:
+                    if self.running and task.target is not None:
+                        paste_text(text, use_cursor_context=self.use_cursor_context, target=task.target)
+                elif not isinstance(task, CompletedCapture) or task.insert:
                     paste_text(text, use_cursor_context=self.use_cursor_context)
             else:
                 logger.info("Transcription yielded no text to insert.")
