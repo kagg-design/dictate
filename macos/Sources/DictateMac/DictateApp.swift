@@ -169,12 +169,6 @@ final class DictateState: ObservableObject {
             }
         }
         toggleMode = defaults.bool(forKey: "toggleMode")
-        postprocessModel = defaults.string(forKey: "postprocessModel") ?? ""
-        if let saved = ShortcutBinding.decode(defaults.data(forKey: "postprocessShortcutBinding")), saved.key != nil,
-           !saved.conflicts(with: dictation), !saved.conflicts(with: .copyLast),
-           insertLastShortcut.map({ !saved.conflicts(with: $0) }) ?? true {
-            postprocessShortcut = saved
-        }
         escapeCancels = defaults.object(forKey: "escapeCancels") as? Bool ?? true
         livePreview = defaults.bool(forKey: "livePreview")
         recordingSounds = defaults.object(forKey: "recordingSounds") as? Bool ?? true
@@ -186,6 +180,12 @@ final class DictateState: ObservableObject {
             defaults.dictionary(forKey: "textReplacements") as? [String: String] ?? [:],
             fuzzySources: Set(defaults.stringArray(forKey: "fuzzyReplacements") ?? [])
         )
+        postprocessModel = defaults.string(forKey: "postprocessModel") ?? ""
+        if let saved = ShortcutBinding.decode(defaults.data(forKey: "postprocessShortcutBinding")), saved.key != nil,
+           !saved.conflicts(with: dictation), !saved.conflicts(with: .copyLast),
+           insertLastShortcut.map({ !saved.conflicts(with: $0) }) ?? true {
+            postprocessShortcut = saved
+        }
         do {
             let days = defaults.integer(forKey: "wavRetentionDays")
             if HistoryEntry.retentionDays.contains(days) { wavRetentionDays = days }
