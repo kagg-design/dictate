@@ -2,9 +2,32 @@
 
 A Windows and macOS dictation app that runs Fluid Speech Mini or Whisper locally and inserts the final text into the focused window when you release the hotkey.
 
-## Build on Mac
+## Changes by version
 
-The macOS beta runs on Apple Silicon with macOS 15 or later. With Xcode 26 or newer selected and CMake available, clone this repository and run `bash macos/build.sh`. The build writes `Dictate-macOS-arm64-beta.dmg` and its SHA-256 file to `artifacts/macos/`. See the [macOS build and setup guide](macos/README.md).
+### 0.3.0
+
+- Record shortcuts using two or three keys. Insert the last dictation from the tray or menu bar, or assign it a shortcut. Windows shortcuts follow the physical keys across keyboard layouts.
+- Add a separate shortcut for local text editing with Ollama. Pick an installed model in Settings. Dictate warms the selected model in the background and can use the original transcript if editing fails.
+- Pin dictations, filter History to pinned entries, and open the folder with saved WAVs. Choose when to remove unpinned audio while keeping its transcript. Spelling rules can also match similar spellings.
+- Adjust the recording cue volume, test both cues in Settings, and optionally lower background audio while recording. Recording and processing have distinct indicators.
+- On Windows, Settings use the system font and collapsible sections. Dictate remembers the selected tab and window placement, including snapped positions, and recovers recording cues after an audio output change.
+- On macOS, Dictate resolves the original text field again before inserting into Slack and other editors that may rebuild their accessibility elements.
+
+### 0.2.0
+
+- Added the Apple Silicon beta and a microphone pre-roll setting. Choose Whisper or Fluid Speech Mini for local recognition.
+- Added hold and toggle dictation, Escape cancellation, optional live text, cursor-aware insertion, spelling replacements from History, and a startup switch.
+- Added **Copy Last Dictation** to the tray and the `Ctrl+Win+V` shortcut on Windows.
+
+### 0.1.0
+
+- First Windows installer with a bundled Python runtime, local Whisper dictation, direct insertion, and an optional NVIDIA CUDA setup.
+
+## Install on macOS
+
+Download `Dictate-macOS-arm64-beta.dmg` from [GitHub Releases](https://github.com/kagg-design/dictate/releases). The beta runs on Apple Silicon with macOS 15 or later. Drag Dictate into Applications and follow the [macOS setup guide](macos/README.md) to grant its permissions.
+
+To build from source, select Xcode 26 or newer and make CMake available, then run `bash macos/build.sh`. The build writes the DMG and its SHA-256 file to `artifacts/macos/`.
 
 ## Install on Windows
 
@@ -26,9 +49,9 @@ Close Dictate from its tray menu before updating or uninstalling. Remove it unde
 - **Direct Insertion:** Types transcribed text into the active Windows application using Unicode input events.
 - **Cursor Context:** When an editable field exposes its caret or selection to Windows UI Automation, Dictate adjusts the first letter, final period, and spaces to fit the surrounding text. Recognized search and address fields keep the dictated capitalization and omit a final period. The previous insertion behavior applies when context is unavailable.
 - **Clipboard Safe:** Automatic dictation leaves the clipboard alone. Use **Copy text** in History to copy a saved transcript.
-- **Dictation History:** Search and recover the latest 100 complete transcripts, including text rejected by the destination field. Optional WAV audio plays from the History window.
+- **Dictation History:** Search recent transcripts, pin entries you want to keep, and play or locate saved WAVs.
 - **System Tray Control:** Click the icon to open Dictate. The right-click menu offers Pause/Resume and Exit.
-- **Safety Hard Caps:** Restricts recording to 60 seconds maximum and discards recordings under 300 ms to avoid accidental keypresses.
+- **Capture Limits:** Caps recordings at 10 minutes and discards captures under 300 ms.
 
 ---
 
@@ -80,7 +103,7 @@ This starts Dictate in the system tray. Click its icon or choose **Dictate** in 
 Build on an x64 Windows PC with Python 3.12 (including Tk) and [Inno Setup 6](https://jrsoftware.org/isdl.php). From the repository root, run this in PowerShell. Substitute the path to `ISCC.exe` if necessary.
 
 ```powershell
-py -3.12 scripts/build_windows.py --compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' --version 0.2.0
+py -3.12 scripts/build_windows.py --compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' --version 0.3.0
 ```
 
 The build checks the packaged Python runtime and produces `Dictate-Setup-x64.exe` and `Dictate-Setup-x64.exe.sha256` in `artifacts/windows/`. Attach both files to a GitHub Release for the matching tag. The binary is a Release asset and stays out of the source tree.
@@ -116,6 +139,10 @@ When **Esc cancels and keeps text in History** is enabled, `Esc` ends the record
 Enable **Start Dictate at login** in **Settings** to start in the tray when you sign in.
 
 To fix a spelling for future dictations, select a word or phrase in **History** and choose **Add replacement…**. Edit or remove saved rules under **Settings → Manage replacements…**.
+
+### Local post-processing
+
+Start [Ollama](https://ollama.com/) and install a local text model. In **Settings → Local post-processing**, refresh the model list, select the model, and assign **Dictate with editing**. Press that shortcut once to start and again to finish. Dictate sends the transcript to Ollama on this computer. The ordinary dictation shortcut still inserts the recognized text directly.
 
 ---
 
@@ -157,5 +184,5 @@ This happens when CTranslate2/faster-whisper cannot locate the NVIDIA DLLs.
 
 ### 7. Recover Dictation Rejected by a Field
 - Click the Dictate tray icon and open **History**. Search or select a row to read a full transcript, then use **Copy text** to copy it.
-- The latest 100 non-empty transcripts are saved locally to `logs/dictation-history.json` before insertion. On first use, available transcripts can be recovered from the application logs.
-- To retain audio for future dictations, turn on **Save WAV audio locally** in Settings. WAV files are saved after text insertion and are playable from History. They stay with their transcripts until the entry ages out.
+- Dictate keeps the latest 100 unpinned transcripts plus any pinned entries in `logs/dictation-history.json`. On first use, available transcripts can be recovered from the application logs.
+- Turn on **Save WAV audio locally** to keep audio for future dictations. Play it in History or choose **Open recordings folder**. Use **Delete unpinned WAV audio after** to expire older audio while keeping its transcript.

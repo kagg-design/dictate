@@ -14,9 +14,13 @@ In **Settings**, choose the shortcut and enable **Press to start / stop** for ha
 
 Choose **Insert Last Dictation** in the menu bar or press **Control + Command + F9** to insert the most recent transcript into the focused editor without using the clipboard. Under **Settings → Dictation controls**, click either shortcut and hold two or three keys together to record it. Use modifiers alone or add one other key. You can turn off the insert shortcut and still use the menu.
 
-A pulsing red microphone appears while Dictate is recording. **Play recording sounds** plays distinct start and stop cues. **Show live transcript while dictating** adds text to the indicator and is off by default. Enable **Start Dictate at login** to use the macOS login item. If macOS asks for approval, enable Dictate under **System Settings → General → Login Items**.
+A pulsing red microphone appears while Dictate is recording. **Play recording sounds** plays distinct start and stop cues. Adjust **Recording cue volume** and use **Test sounds** to hear both cues. **Show live transcript while dictating** adds text to the indicator and is off by default. Enable **Start Dictate at login** to use the macOS login item. If macOS asks for approval, enable Dictate under **System Settings → General → Login Items**.
 
 Select a word or phrase in **History** and choose **Add replacement…** to fix its spelling in future dictations. Edit or remove saved rules under **Settings → Text replacements**.
+
+Use **Pin** and **Pinned only** to keep and find important dictations. With **Save WAV files in History** enabled, use **Open recordings folder** to find the audio in Finder. Choose an audio retention period in Settings to remove older unpinned WAVs.
+
+For optional text editing, start Ollama, choose an installed model in **Settings → Local post-processing**, and set **Dictate with editing**. The selected model warms up in the background after the speech model loads.
 
 ## Build
 
