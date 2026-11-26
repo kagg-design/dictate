@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
     "live_preview": False,
     "use_cursor_context": True,
     "text_replacements": {},
+    "fuzzy_replacements": [],
     "recognition_model": "whisper",
     "microphone": None,
     "save_wav": False,

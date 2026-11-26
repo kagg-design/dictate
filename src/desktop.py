@@ -495,6 +495,8 @@ class DictateWindow:
             entry.pack(fill="x", pady=(4, 10))
             inputs.append(entry)
         first, replacement = inputs
+        fuzzy = tk.BooleanVar(dialog, recognized in self.app.replacements.fuzzy_sources)
+        ttk.Checkbutton(body, text="Also correct similar spellings", variable=fuzzy).pack(anchor="w", pady=(0, 8))
         status = ttk.Label(body, style="Muted.TLabel", wraplength=360)
         status.pack(anchor="w")
         saved = False
@@ -504,6 +506,7 @@ class DictateWindow:
             try:
                 rules = self.app.replacements.update(
                     first.get(), replacement.get(), previous=existing[0] if existing else None,
+                    fuzzy=fuzzy.get(),
                 )
                 self.app.set_replacements(rules)
             except ValueError as exc:

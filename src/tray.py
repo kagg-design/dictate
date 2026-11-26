@@ -36,7 +36,7 @@ class SystemTrayApp:
         self, transcriber, recorder, hotkey_manager, on_exit_callback,
         show_startup_notifications=True, history=None, models=None,
         open_window=None, save_wav=False, live_preview=False, use_cursor_context=True,
-        text_replacements=None,
+        text_replacements=None, fuzzy_replacements=(),
     ):
         """
         Coordinates the system tray interface, state changes, and background tasks.
@@ -64,7 +64,7 @@ class SystemTrayApp:
         self.save_wav = save_wav
         self.live_preview = live_preview
         self.use_cursor_context = use_cursor_context
-        self.replacements = TextReplacements.from_config(text_replacements)
+        self.replacements = TextReplacements.from_config(text_replacements, fuzzy_replacements)
         self.preview_text = ""
         
         self.state = 'idle'
@@ -236,7 +236,10 @@ class SystemTrayApp:
                 self.settings_error = ""
 
     def set_replacements(self, replacements):
-        save_settings({"text_replacements": dict(replacements.rules)})
+        save_settings({
+            "text_replacements": dict(replacements.rules),
+            "fuzzy_replacements": sorted(replacements.fuzzy_sources),
+        })
         self.replacements = replacements
 
     @staticmethod

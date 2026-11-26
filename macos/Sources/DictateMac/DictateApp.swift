@@ -134,7 +134,10 @@ final class DictateState: ObservableObject {
         escapeCancels = defaults.object(forKey: "escapeCancels") as? Bool ?? true
         livePreview = defaults.bool(forKey: "livePreview")
         useCursorContext = defaults.object(forKey: "useCursorContext") as? Bool ?? true
-        replacements = TextReplacements(defaults.dictionary(forKey: "textReplacements") as? [String: String] ?? [:])
+        replacements = TextReplacements(
+            defaults.dictionary(forKey: "textReplacements") as? [String: String] ?? [:],
+            fuzzySources: Set(defaults.stringArray(forKey: "fuzzyReplacements") ?? [])
+        )
         do {
             history = try DictateFiles.loadHistory()
         } catch {
@@ -281,24 +284,31 @@ final class DictateState: ObservableObject {
         guard !source.isEmpty, !value.isEmpty else {
             throw DictateError("Enter both the recognized text and its replacement.")
         }
+        guard !draft.fuzzy || TextReplacements.supportsFuzzySpelling(value) else {
+            throw DictateError("Similar-spelling corrections support words made of letters.")
+        }
         var rules = replacements.saved
         if let previous = draft.previous { rules.removeValue(forKey: previous) }
         guard !rules.keys.contains(where: { $0.caseInsensitiveCompare(source) == .orderedSame }) else {
             throw DictateError("A replacement for this text already exists.")
         }
         rules[source] = value
-        storeReplacements(rules)
+        var fuzzySources = replacements.fuzzySources
+        if let previous = draft.previous { fuzzySources.remove(previous) }
+        if draft.fuzzy { fuzzySources.insert(source) }
+        storeReplacements(rules, fuzzySources: fuzzySources)
     }
 
     func removeReplacement(_ source: String) {
         var rules = replacements.saved
         rules.removeValue(forKey: source)
-        storeReplacements(rules)
+        storeReplacements(rules, fuzzySources: replacements.fuzzySources.subtracting([source]))
     }
 
-    private func storeReplacements(_ rules: [String: String]) {
+    private func storeReplacements(_ rules: [String: String], fuzzySources: Set<String>) {
         UserDefaults.standard.set(rules, forKey: "textReplacements")
-        replacements = TextReplacements(rules)
+        UserDefaults.standard.set(fuzzySources.sorted(), forKey: "fuzzyReplacements")
+        replacements = TextReplacements(rules, fuzzySources: fuzzySources)
     }
 
     func copy(_ entry: HistoryEntry) {
@@ -489,7 +499,8 @@ private struct DictateWindow: View {
                         HStack {
                             Button("Edit…") {
                                 replacementDraft = ReplacementDraft(
-                                    source: rule.source, value: rule.replacement, previous: rule.source
+                                    source: rule.source, value: rule.replacement, previous: rule.source,
+                                    fuzzy: state.replacements.fuzzySources.contains(rule.source)
                                 )
                             }
                             Button("Remove") { state.removeReplacement(rule.source) }
@@ -512,7 +523,8 @@ private struct DictateWindow: View {
                     $0.source.caseInsensitiveCompare(selected) == .orderedSame
                 }
                 replacementDraft = ReplacementDraft(
-                    source: existing?.source ?? selected, value: existing?.replacement ?? "", previous: existing?.source
+                    source: existing?.source ?? selected, value: existing?.replacement ?? "", previous: existing?.source,
+                    fuzzy: state.replacements.fuzzySources.contains(existing?.source ?? "")
                 )
             }
         }

@@ -329,6 +329,7 @@ def main():
         live_preview=config["live_preview"] is True,
         use_cursor_context=config["use_cursor_context"] is not False,
         text_replacements=config["text_replacements"],
+        fuzzy_replacements=config["fuzzy_replacements"],
     )
     desktop.start(tray_app, appearance=config["appearance"])
 
