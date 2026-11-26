@@ -25,6 +25,7 @@ from src.history import WAV_RETENTION_OPTIONS
 from src.hotkey import MODES
 from src.overlay import RecordingOverlay
 from src.paths import APP_ROOT
+from src.postprocess import installed_models
 from src.recording_cues import RecordingCuePlayer
 from src.recorder import list_microphones
 from src.settings_view import SCROLL_STEP, SettingsView
@@ -403,12 +404,17 @@ class DictateWindow:
         ]
 
         processing = canvas.add_section("postprocessing", "Local post-processing")
-        row = self._settings_row(processing, "Ollama model", "Enter the name of an installed local model.")
-        self.ollama_model = ttk.Entry(row, width=24)
-        self.ollama_model.insert(0, self.app.postprocess_model)
+        row = self._settings_row(processing, "Ollama model")
+        self.ollama_model = self._settings_combo(row, 24, (), self._save_postprocessing)
+        self.ollama_model.set(self.app.postprocess_model)
         self.ollama_model.pack(side="left")
-        self.save_ollama = ttk.Button(row, text="Save", style="Settings.TButton", command=self._save_postprocessing)
-        self.save_ollama.pack(side="left", padx=(4, 0))
+        self.refresh_ollama = ttk.Button(row, text="Refresh", style="Settings.TButton", command=self._refresh_ollama_models)
+        self.refresh_ollama.pack(side="left", padx=(4, 0))
+        self.ollama_status = ttk.Label(row, style="SettingsDetail.TLabel")
+        self.ollama_status.pack(side="left", padx=(8, 0))
+        self._ollama_results = SimpleQueue()
+        self._loading_ollama = False
+        self._requested_ollama = False
         self.postprocess_button = self._shortcut_button(processing, "Dictate with editing", "postprocess_shortcut")
         self.settings_canvas.add_row(processing, "Press the editing shortcut once to start and again to finish.")
 
@@ -677,8 +683,33 @@ class DictateWindow:
         else:
             self._save_dictation_preferences(**{slot: binding})
 
-    def _save_postprocessing(self):
+    def _save_postprocessing(self, event=None):
         self.app.set_postprocessing(self.ollama_model.get(), self.app.hotkey_manager.postprocess_shortcut)
+        self._refresh_settings(force=True)
+
+    def _refresh_ollama_models(self):
+        if self._loading_ollama:
+            return
+        self._requested_ollama = self._loading_ollama = True
+        self.refresh_ollama.configure(state="disabled")
+
+        def load():
+            try:
+                self._ollama_results.put((installed_models(), None))
+            except ValueError as exc:
+                self._ollama_results.put(((), str(exc)))
+
+        threading.Thread(target=load, name="DictateOllamaModels", daemon=True).start()
+
+    def _poll_ollama_models(self):
+        try:
+            models, error = self._ollama_results.get_nowait()
+        except Empty:
+            return
+        self._loading_ollama = False
+        self.ollama_model.configure(values=models)
+        self.refresh_ollama.configure(state="normal")
+        self.ollama_status.configure(text="Ollama unavailable" if error else ("No local models" if not models else ""))
         self._refresh_settings(force=True)
 
     def _poll_shortcut_capture(self):
@@ -734,6 +765,8 @@ class DictateWindow:
             self._schedule_window_preferences_save()
         if name == "Settings":
             self._refresh_microphones()
+            if not self._requested_ollama:
+                self._refresh_ollama_models()
         else:
             self._refresh_history()
 
@@ -789,6 +822,7 @@ class DictateWindow:
         self.stop_audio()
 
     def _poll(self):
+        self._poll_ollama_models()
         self._poll_timer = None
         self._update_status()
         if self._page == "Settings":
@@ -909,8 +943,8 @@ class DictateWindow:
         self.disable_postprocess.configure(
             state="disabled" if busy or capture_slot is not None or hotkeys.postprocess_shortcut is None else "normal"
         )
-        self.ollama_model.configure(state="disabled" if busy else "normal")
-        self.save_ollama.configure(state="disabled" if busy else "normal")
+        self.ollama_model.configure(state="disabled" if busy else "readonly")
+        self.ollama_model.set(self.app.postprocess_model)
         for option in self.dictation_options:
             option.configure(state="disabled" if busy else "normal")
         self.escape_cancels.set(hotkeys.escape_cancels)

@@ -15,7 +15,10 @@ PROMPT = (
 def _request(path, data, *, timeout):
     connection = HTTPConnection("127.0.0.1", 11434, timeout=timeout)
     try:
-        connection.request("POST", path, json.dumps(data).encode("utf-8"), {"Content-Type": "application/json"})
+        if data is None:
+            connection.request("GET", path)
+        else:
+            connection.request("POST", path, json.dumps(data).encode("utf-8"), {"Content-Type": "application/json"})
         response = connection.getresponse()
         if response.status != 200:
             raise ValueError(f"Ollama returned HTTP {response.status}.")
@@ -30,15 +33,30 @@ def _request(path, data, *, timeout):
         connection.close()
 
 
+def installed_models():
+    """List locally installed models without requesting a generation."""
+    try:
+        result = _request("/api/tags", None, timeout=2)
+        return tuple(sorted({
+            item["name"] for item in result["models"]
+            if isinstance(item.get("name"), str) and not (item.get("remote_host") or item.get("remote_model"))
+        }, key=str.casefold))
+    except (OSError, HTTPException, AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Could not list installed Ollama models.") from exc
+
+
 def polish(text, model):
     """Return the edited text, or raise without delivering partial output."""
     try:
         info = _request("/api/show", {"model": model}, timeout=2)
         if not isinstance(info.get("details"), dict) or info.get("remote_host") or info.get("remote_model"):
             raise ValueError("Choose an installed local Ollama model.")
+        capabilities = info.get("capabilities")
+        thinking = {"think": False} if isinstance(capabilities, list) and "thinking" in capabilities else {}
         result = _request("/api/chat", {
             "model": model,
             "stream": False,
+            **thinking,
             "options": {"temperature": 0},
             "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": text}],
         }, timeout=20)

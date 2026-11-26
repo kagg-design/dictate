@@ -329,7 +329,7 @@ class SystemTrayApp:
             if not self.running or self._capture:
                 return False
             if postprocess and not self.postprocess_model:
-                self.show_notification("Post-Processing", "Enter a local Ollama model in Dictate Settings.")
+                self.show_notification("Post-Processing", "Select a local Ollama model in Dictate Settings.")
                 return False
             if self.settings_activity or self.transcriber is None:
                 message = (

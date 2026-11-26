@@ -3,10 +3,20 @@ import unittest
 from unittest.mock import Mock, patch
 
 from src.hotkey import HotkeyManager
-from src.postprocess import polish
+from src.postprocess import installed_models, polish
 
 
 class PostprocessTests(unittest.TestCase):
+    @patch("src.postprocess._request")
+    def test_model_picker_lists_only_local_models(self, request):
+        request.return_value = {"models": [
+            {"name": "gemma4:e2b"},
+            {"name": "remote", "remote_host": "https://ollama.com"},
+            {"name": "gemma3:4b"},
+        ]}
+        self.assertEqual(installed_models(), ("gemma3:4b", "gemma4:e2b"))
+        request.assert_called_once_with("/api/tags", None, timeout=2)
+
     @patch("src.postprocess._request")
     def test_only_sends_transcript_after_confirming_a_local_model(self, request):
         request.side_effect = [

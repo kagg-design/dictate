@@ -515,7 +515,7 @@ final class DictateState: ObservableObject {
         guard !busy else { shortcut.disarm(); return }
         if postprocess && postprocessModel.isEmpty {
             shortcut.disarm()
-            status = "Enter a local Ollama model in Dictate Settings."
+            status = "Select a local Ollama model in Dictate Settings."
             return
         }
         guard microphoneAllowed else {
@@ -800,18 +800,38 @@ private struct DictateWindow: View {
 }
 
 private struct PostprocessSettings: View {
-    let state: DictateState
-    @State private var model = ""
+    @ObservedObject var state: DictateState
+    @State private var models = [String]()
+    @State private var loading = false
+    @State private var status = ""
 
     var body: some View {
         LabeledContent("Ollama model") {
-            TextField("Installed model name", text: $model)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { state.setPostprocessModel(model) }
-            Button("Save") { state.setPostprocessModel(model) }
-                .disabled(model == state.postprocessModel)
+            Picker("Ollama model", selection: Binding(get: { state.postprocessModel }, set: state.setPostprocessModel)) {
+                Text("Select a model").tag("")
+                if !state.postprocessModel.isEmpty, !models.contains(state.postprocessModel) {
+                    Text(state.postprocessModel).tag(state.postprocessModel)
+                }
+                ForEach(models, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+            Button("Refresh") { Task { await refresh() } }.disabled(loading)
+            if !status.isEmpty { Text(status).foregroundStyle(.secondary) }
         }
-        .onAppear { model = state.postprocessModel }
+        .task { await refresh() }
+    }
+
+    private func refresh() async {
+        guard !loading else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            models = try await Postprocess.installedModels()
+            status = models.isEmpty ? "No local models" : ""
+        } catch {
+            models = []
+            status = "Ollama unavailable"
+        }
     }
 }
 
