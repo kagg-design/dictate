@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -95,6 +97,41 @@ class DictationHistoryTests(unittest.TestCase):
         )
         history = DictationHistory(self.path)
         self.assertIsNone(history.audio_path(history.recent()[0]))
+
+    def test_pinned_transcript_and_late_wav_survive_eviction(self):
+        history = DictationHistory(self.path, max_entries=1)
+        pinned = history.add("keep")
+        self.assertTrue(history.set_pinned(pinned, True))
+        history.save_audio(pinned, np.array([1, 2], dtype=np.int16), 16000)
+        history.add("middle")
+        history.add("latest")
+
+        reopened = DictationHistory(self.path, max_entries=1)
+        latest, retained = reopened.recent()
+        self.assertEqual((latest.text, retained.text), ("latest", "keep"))
+        self.assertTrue(retained.pinned)
+        self.assertTrue(reopened.audio_path(retained).is_file())
+        self.assertTrue(reopened.set_pinned(retained, False))
+        self.assertEqual([entry.text for entry in reopened.recent()], ["latest"])
+
+    def test_expiry_keeps_unpinned_text_and_pinned_audio(self):
+        history = DictationHistory(self.path)
+        pcm = np.array([1, 2], dtype=np.int16)
+        first, second = history.add("first"), history.add("second")
+        history.save_audio(first, pcm, 16000)
+        self.assertTrue(history.set_pinned(second, True))
+        history.save_audio(second, pcm, 16000)
+        files = {entry.text: history.audio_path(entry) for entry in history.recent()}
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        for entry in data["entries"]:
+            entry["created_at"] = (datetime.now().astimezone() - timedelta(days=8)).isoformat()
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+        reopened = DictationHistory(self.path, audio_retention_days=7)
+        self.assertEqual([entry.text for entry in reopened.recent()], ["second", "first"])
+        self.assertTrue(files["second"].exists())
+        self.assertFalse(files["first"].exists())
+        self.assertIsNone(reopened.recent()[1].audio_file)
 
 
 if __name__ == "__main__":

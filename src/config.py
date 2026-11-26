@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     "recognition_model": "whisper",
     "microphone": None,
     "save_wav": False,
+    "wav_retention_days": 0,
     "appearance": "System",
     "model_name": "large-v3-turbo",
     "device": "auto" if IS_INSTALLED else "cuda",

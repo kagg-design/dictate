@@ -36,7 +36,7 @@ class SystemTrayApp:
         self, transcriber, recorder, hotkey_manager, on_exit_callback,
         show_startup_notifications=True, history=None, models=None,
         open_window=None, save_wav=False, live_preview=False, use_cursor_context=True,
-        text_replacements=None, fuzzy_replacements=(),
+        text_replacements=None, fuzzy_replacements=(), wav_retention_days=0,
     ):
         """
         Coordinates the system tray interface, state changes, and background tasks.
@@ -51,7 +51,7 @@ class SystemTrayApp:
         self.hotkey_manager = hotkey_manager
         self.on_exit_callback = on_exit_callback
         self.show_startup_notifications = show_startup_notifications
-        self.history = history if history is not None else DictationHistory()
+        self.history = history if history is not None else DictationHistory(audio_retention_days=wav_retention_days)
         self.models = models or {}
         self.model_name = None
         self._capture_lock = threading.Lock()
@@ -241,6 +241,16 @@ class SystemTrayApp:
             "fuzzy_replacements": sorted(replacements.fuzzy_sources),
         })
         self.replacements = replacements
+
+    def set_wav_retention(self, days):
+        try:
+            save_settings({"wav_retention_days": days})
+        except (OSError, ValueError):
+            logger.exception("Could not save the audio retention setting")
+            self.settings_error = "Could not save audio retention."
+        else:
+            saved = self.history.set_audio_retention(days)
+            self.settings_error = "" if saved else "Could not clean up older recordings."
 
     @staticmethod
     def _close_engine(engine):

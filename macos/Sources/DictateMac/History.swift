@@ -5,7 +5,23 @@ struct HistoryEntry: Identifiable, Codable {
     let date: Date
     let model: String
     let text: String
-    let audioFile: String?
+    var audioFile: String?
+    var pinned: Bool? = nil
+
+    static let retentionDays = [0, 7, 30, 90]
+
+    static func retained(_ entries: [Self], audioDays: Int, now: Date = Date()) -> [Self] {
+        let cutoff = now.addingTimeInterval(-Double(audioDays) * 86_400)
+        var remaining = 100
+        return entries.compactMap { entry in
+            if entry.pinned == true { return entry }
+            guard remaining > 0 else { return nil }
+            remaining -= 1
+            var retained = entry
+            if audioDays > 0, entry.date < cutoff { retained.audioFile = nil }
+            return retained
+        }
+    }
 }
 
 enum DictateFiles {

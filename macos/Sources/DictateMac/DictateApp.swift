@@ -98,6 +98,7 @@ final class DictateState: ObservableObject {
     @Published private(set) var recording = false
     @Published private(set) var finishing = false
     @Published private(set) var history: [HistoryEntry] = []
+    @Published private(set) var wavRetentionDays = 0
 
     private let recorder = AudioCapture()
     private let shortcut = DictationShortcut()
@@ -139,10 +140,17 @@ final class DictateState: ObservableObject {
             fuzzySources: Set(defaults.stringArray(forKey: "fuzzyReplacements") ?? [])
         )
         do {
+            let days = defaults.integer(forKey: "wavRetentionDays")
+            if HistoryEntry.retentionDays.contains(days) { wavRetentionDays = days }
             history = try DictateFiles.loadHistory()
         } catch {
             maySaveHistory = false
             status = "Could not read the existing history."
+        }
+        let retained = HistoryEntry.retained(history, audioDays: wavRetentionDays)
+        if retained.count != history.count || retained.map(\.audioFile) != history.map(\.audioFile) {
+            do { try storeHistory(retained) }
+            catch { status = "Could not clean up older recordings." }
         }
         shortcut.choice = shortcutChoice
         shortcut.toggle = toggleMode
@@ -316,6 +324,38 @@ final class DictateState: ObservableObject {
         NSPasteboard.general.setString(entry.text, forType: .string)
     }
 
+    func setPinned(_ entry: HistoryEntry, _ pinned: Bool) {
+        guard let index = history.firstIndex(where: { $0.id == entry.id }) else { return }
+        var updated = history
+        updated[index].pinned = pinned ? true : nil
+        do {
+            try storeHistory(HistoryEntry.retained(updated, audioDays: wavRetentionDays))
+        } catch {
+            status = "Could not update this pin."
+        }
+    }
+
+    func setWavRetention(_ days: Int) {
+        do {
+            try storeHistory(HistoryEntry.retained(history, audioDays: days))
+            wavRetentionDays = days
+            UserDefaults.standard.set(days, forKey: "wavRetentionDays")
+        } catch {
+            status = "Could not clean up older recordings."
+        }
+    }
+
+    private func storeHistory(_ updated: [HistoryEntry], added: HistoryEntry? = nil) throws {
+        guard maySaveHistory else { throw DictateError("Could not read the existing history.") }
+        try DictateFiles.saveHistory(updated)
+        let remainingAudio = Set(updated.compactMap(\.audioFile))
+        let previousAudio = history.compactMap(\.audioFile) + [added?.audioFile].compactMap { $0 }
+        for file in previousAudio where !remainingAudio.contains(file) {
+            if let url = DictateFiles.audioURL(file) { try? FileManager.default.removeItem(at: url) }
+        }
+        history = updated
+    }
+
     func play(_ entry: HistoryEntry) {
         guard let file = entry.audioFile, let url = DictateFiles.audioURL(file) else { return }
         do {
@@ -404,15 +444,13 @@ final class DictateState: ObservableObject {
                 let id = UUID()
                 let audioFile = keepWav ? try? DictateFiles.saveAudio(samples, id: id) : nil
                 let entry = HistoryEntry(id: id, date: session.date, model: session.model.label, text: full, audioFile: audioFile)
-                history.insert(entry, at: 0)
-                let evicted = Array(history.dropFirst(100))
-                history = Array(history.prefix(100))
-                if maySaveHistory, (try? DictateFiles.saveHistory(history)) != nil {
-                    for previous in evicted {
-                        if let file = previous.audioFile, let url = DictateFiles.audioURL(file) {
-                            try? FileManager.default.removeItem(at: url)
-                        }
-                    }
+                let updated = [entry] + history
+                let retained = HistoryEntry.retained(updated, audioDays: wavRetentionDays)
+                do {
+                    try storeHistory(retained, added: entry)
+                } catch {
+                    // Keep the new transcript recoverable in memory after a failed write.
+                    history = HistoryEntry.retained(updated, audioDays: 0)
                 }
                 let inserted = insert && (session.target?.insert(full, useCursorContext: useCursorContext) ?? false)
                 if !insert {
@@ -481,6 +519,12 @@ private struct DictateWindow: View {
                 Text("At 0 ms the ring buffer is off and the microphone opens only for dictation. When enabled, the mic stays open and only the selected duration of recent audio is held in memory before dictation.")
                     .font(.callout).foregroundStyle(.secondary)
                 Toggle("Save WAV files in History", isOn: Binding(get: { state.saveWav }, set: state.setSaveWav))
+                Picker("Delete unpinned WAV audio after",
+                       selection: Binding(get: { state.wavRetentionDays }, set: state.setWavRetention)) {
+                    ForEach(HistoryEntry.retentionDays, id: \.self) { days in
+                        Text(days == 0 ? "Keep with transcript" : "\(days) days").tag(days)
+                    }
+                }
                 Toggle("Start Dictate at login", isOn: Binding(get: { state.loginEnabled }, set: state.setStartAtLogin))
                 if state.loginRequiresApproval {
                     Text("Allow Dictate under System Settings → General → Login Items.")
@@ -549,13 +593,17 @@ private struct HistoryRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(entry.date.formatted(date: .abbreviated, time: .shortened))
-                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                if entry.pinned == true { Image(systemName: "star.fill").accessibilityLabel("Pinned") }
+                Text(entry.date.formatted(date: .abbreviated, time: .shortened))
+            }
+            .font(.caption).foregroundStyle(.secondary)
             HistoryTranscript(text: entry.text, selection: $selection)
             HStack {
                 Button("Copy") { state.copy(entry) }
                 if entry.audioFile != nil { Button("Play WAV") { state.play(entry) } }
                 Button("Add replacement…") { addReplacement(selection) }.disabled(selection.isEmpty)
+                Button(entry.pinned == true ? "Unpin" : "Pin") { state.setPinned(entry, entry.pinned != true) }
             }
             .buttonStyle(.borderless)
         }

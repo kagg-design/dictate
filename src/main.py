@@ -326,6 +326,7 @@ def main():
         models=models,
         open_window=desktop.show,
         save_wav=config["save_wav"] is True,
+        wav_retention_days=config["wav_retention_days"],
         live_preview=config["live_preview"] is True,
         use_cursor_context=config["use_cursor_context"] is not False,
         text_replacements=config["text_replacements"],

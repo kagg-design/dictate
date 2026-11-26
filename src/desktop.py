@@ -23,6 +23,7 @@ from src.desktop_theme import (
     system_appearance,
 )
 from src.logger import logger
+from src.history import WAV_RETENTION_OPTIONS
 from src.hotkey import MODES, SHORTCUTS
 from src.overlay import RecordingOverlay
 from src.recorder import list_microphones
@@ -264,8 +265,12 @@ class DictateWindow:
         self.history_list.bind("<<TreeviewSelect>>", self._show_selected)
         self.history_list.bind("<Return>", lambda event: self._copy_selected())
 
-        self.details_title = ttk.Label(details, style="Section.TLabel")
-        self.details_title.pack(anchor="w")
+        header = ttk.Frame(details, style="Surface.TFrame")
+        header.pack(fill="x")
+        self.details_title = ttk.Label(header, style="Section.TLabel")
+        self.details_title.pack(side="left")
+        self.pin_button = ttk.Button(header, text="Pin", command=self._toggle_pin)
+        self.pin_button.pack(side="right")
         self.details_model = ttk.Label(details, style="PanelMuted.TLabel")
         self.details_model.pack(anchor="w", pady=(3, 10))
         transcript = ttk.Frame(details, style="Surface.TFrame")
@@ -390,10 +395,10 @@ class DictateWindow:
             command=lambda: self.app.set_save_wav(self.save_audio.get()),
         )
         self.wav_option.pack(anchor="w", pady=(8, 4))
-        ttk.Label(
-            history, text="Play back new recordings from History. Audio is kept with its transcript.",
-            style="PanelMuted.TLabel", wraplength=300,
-        ).pack(anchor="w")
+        ttk.Label(history, text="WAV retention", style="PanelMuted.TLabel").pack(anchor="w")
+        self.wav_retention = ttk.Combobox(history, state="readonly", values=tuple(WAV_RETENTION_OPTIONS.values()))
+        self.wav_retention.pack(anchor="w", pady=(4, 0))
+        self.wav_retention.bind("<<ComboboxSelected>>", self._set_wav_retention)
         self.start_at_login = tk.BooleanVar(self.window)
         ttk.Checkbutton(
             history, text="Start Dictate at login", variable=self.start_at_login,
@@ -402,6 +407,10 @@ class DictateWindow:
         ).pack(anchor="w", pady=(8, 0))
         ttk.Button(history, text="Manage replacements…", command=self._manage_replacements).pack(anchor="w", pady=(8, 0))
         return page
+
+    def _set_wav_retention(self, event=None):
+        self.app.set_wav_retention(tuple(WAV_RETENTION_OPTIONS)[self.wav_retention.current()])
+        self._refresh_settings(force=True)
 
     def _add_history_replacement(self):
         selection = self.transcript.tag_ranges("sel")
@@ -697,6 +706,7 @@ class DictateWindow:
             option.configure(state="disabled" if busy else "normal")
         self.escape_cancels.set(hotkeys.escape_cancels)
         self.preview.set(self.app.live_preview)
+        self.wav_retention.set(WAV_RETENTION_OPTIONS[self.app.history.audio_retention_days])
         self.cursor_context.set(self.app.use_cursor_context)
         self.start_at_login.set(bool(self._startup_path and self._startup_path.is_file()))
         if notice:
@@ -719,8 +729,10 @@ class DictateWindow:
             item = str(index)
             self._visible_entries[item] = entry
             summary = " ".join(entry.text.split())
+            if entry.pinned:
+                summary = "★ " + summary
             self.history_list.insert("", "end", iid=item, values=(entry.created_at.strftime("%d %b · %H:%M"), summary))
-            if old_selection and old_selection.created_at == entry.created_at and not follow_newest:
+            if old_selection and old_selection.id == entry.id and not follow_newest:
                 selection = item
 
         self.entry_count.configure(text=f"{len(entries)} dictation" if len(entries) == 1 else f"{len(entries)} dictations")
@@ -733,7 +745,7 @@ class DictateWindow:
     def _show_selected(self, event=None):
         selected = self.history_list.selection()
         entry = self._visible_entries.get(selected[0]) if selected else None
-        if not self._selected or not entry or self._selected.created_at != entry.created_at:
+        if not self._selected or not entry or self._selected.id != entry.id:
             self.stop_audio()
         self._selected = entry
         self.transcript.configure(state="normal")
@@ -748,9 +760,19 @@ class DictateWindow:
             self.details_model.configure(text="")
         self.copy_button.configure(state="normal" if entry else "disabled")
         self.replacement_button.configure(state="normal" if entry else "disabled")
+        self.pin_button.configure(
+            text="Unpin" if entry and entry.pinned else "Pin", state="normal" if entry else "disabled"
+        )
         can_play = bool(entry and self.app.history.audio_path(entry))
         self.audio_button.configure(state="normal" if can_play else "disabled")
         self.history_feedback.configure(text="")
+
+    def _toggle_pin(self):
+        entry = self._selected
+        if entry and self.app.history.set_pinned(entry, not entry.pinned):
+            self._refresh_history()
+        elif entry:
+            self.history_feedback.configure(text="Could not update this pin.")
 
     def _copy_selected(self):
         if self._selected:
