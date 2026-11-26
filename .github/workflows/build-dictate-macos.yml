@@ -1,0 +1,48 @@
+name: Build Dictate 0.3.0 for macOS
+on:
+  push:
+    branches: [codex/macos-release-0.3.0]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      RELEASE_COMMIT: 1c726e12c8b6ca8ab98508242521edb356f282a4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build and run Swift tests
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          git diff --exit-code "$RELEASE_COMMIT" HEAD -- macos icon.png
+          xcodebuild -version
+          bash macos/build.sh
+      - name: Check the packaged app and both speech models
+        run: |
+          set -euo pipefail
+          image="$PWD/artifacts/macos/Dictate-macOS-arm64-beta.dmg"
+          (cd artifacts/macos && shasum -a 256 -c Dictate-macOS-arm64-beta.dmg.sha256)
+          mount="$(mktemp -d "$RUNNER_TEMP/dictate-mount.XXXXXX")"
+          hdiutil attach -readonly -nobrowse -quiet -mountpoint "$mount" "$image"
+          trap 'hdiutil detach -quiet "$mount"' EXIT
+          app="$mount/Dictate.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = "0.3.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "15.0"
+          test "$(lipo -archs "$app/Contents/MacOS/DictateMac")" = arm64
+          test "$(lipo -archs "$app/Contents/MacOS/DictateWhisper")" = arm64
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/MacOS/DictateMac" --check-models "$PWD/.github/dictate-smoke.wav" "blue mountain"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Dictate-macOS-v0.3.0
+          path: artifacts/macos/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
