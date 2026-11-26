@@ -712,6 +712,7 @@ private struct DictateWindow: View {
     @ObservedObject var state: DictateState
     @State private var tab = "Settings"
     @State private var replacementDraft: ReplacementDraft?
+    @State private var pinnedOnly = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -849,19 +850,31 @@ private struct DictateWindow: View {
     }
 
     private var history: some View {
-        List(state.history) { entry in
-            HistoryRow(entry: entry, state: state) { selected in
-                let existing = state.replacements.rules.first {
-                    $0.source.caseInsensitiveCompare(selected) == .orderedSame
-                }
-                replacementDraft = ReplacementDraft(
-                    source: existing?.source ?? selected, value: existing?.replacement ?? "", previous: existing?.source,
-                    fuzzy: state.replacements.fuzzySources.contains(existing?.source ?? "")
-                )
+        let entries = pinnedOnly ? state.history.filter { $0.pinned == true } : state.history
+        return VStack(spacing: 10) {
+            HStack {
+                Toggle("Pinned only", isOn: $pinnedOnly).toggleStyle(.checkbox)
+                Spacer()
+                Button("Open recordings folder") { NSWorkspace.shared.open(DictateFiles.audioDirectory) }
+                    .disabled(!FileManager.default.fileExists(atPath: DictateFiles.audioDirectory.path))
             }
-        }
-        .overlay {
-            if state.history.isEmpty { ContentUnavailableView("No dictations yet", systemImage: "waveform") }
+            List(entries) { entry in
+                HistoryRow(entry: entry, state: state) { selected in
+                    let existing = state.replacements.rules.first {
+                        $0.source.caseInsensitiveCompare(selected) == .orderedSame
+                    }
+                    replacementDraft = ReplacementDraft(
+                        source: existing?.source ?? selected, value: existing?.replacement ?? "", previous: existing?.source,
+                        fuzzy: state.replacements.fuzzySources.contains(existing?.source ?? "")
+                    )
+                }
+            }
+            .overlay {
+                if entries.isEmpty {
+                    ContentUnavailableView(pinnedOnly ? "No pinned dictations" : "No dictations yet",
+                                           systemImage: pinnedOnly ? "star" : "waveform")
+                }
+            }
         }
     }
 

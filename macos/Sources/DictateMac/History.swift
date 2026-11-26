@@ -28,6 +28,7 @@ enum DictateFiles {
     static let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Dictate", isDirectory: true)
     static let models = root.appendingPathComponent("Models", isDirectory: true)
+    static let audioDirectory = root.appendingPathComponent("Audio", isDirectory: true)
     private static let history = root.appendingPathComponent("history.json")
 
     static func loadHistory() throws -> [HistoryEntry] {
@@ -42,7 +43,7 @@ enum DictateFiles {
 
     static func audioURL(_ name: String) -> URL? {
         guard name.hasSuffix(".wav"), UUID(uuidString: String(name.dropLast(4))) != nil else { return nil }
-        return root.appendingPathComponent("Audio", isDirectory: true).appendingPathComponent(name)
+        return audioDirectory.appendingPathComponent(name)
     }
 
     static func saveAudio(_ samples: [Float], id: UUID) throws -> String {

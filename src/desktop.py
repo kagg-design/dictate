@@ -3,6 +3,7 @@
 from queue import Empty, SimpleQueue
 import ctypes
 from ctypes import wintypes
+import os
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -276,7 +277,13 @@ class DictateWindow:
 
     def _build_history(self):
         page = ttk.Frame(self.content)
-        ttk.Label(page, text="Dictation history", style="Heading.TLabel").pack(anchor="w")
+        header = ttk.Frame(page)
+        header.pack(fill="x")
+        ttk.Label(header, text="Dictation history", style="Heading.TLabel").pack(side="left")
+        self.recordings_folder = ttk.Button(
+            header, text="Open recordings folder", command=self._open_recordings_folder, state="disabled",
+        )
+        self.recordings_folder.pack(side="right")
         searchbar = ttk.Frame(page)
         searchbar.pack(fill="x", pady=(17, 12))
         ttk.Label(searchbar, text="Search").pack(side="left", padx=(0, 9))
@@ -284,6 +291,10 @@ class DictateWindow:
         self.search_box = ttk.Entry(searchbar, textvariable=self.search, width=28)
         self.search_box.pack(side="left")
         ttk.Button(searchbar, text="Clear", command=lambda: self.search.set("")).pack(side="left", padx=(7, 0))
+        self.pinned_only = tk.BooleanVar(self.window)
+        ttk.Checkbutton(
+            searchbar, text="Pinned only", variable=self.pinned_only, command=self._refresh_history,
+        ).pack(side="left", padx=(14, 0))
         self.entry_count = ttk.Label(searchbar, style="Muted.TLabel")
         self.entry_count.pack(side="right")
 
@@ -977,10 +988,12 @@ class DictateWindow:
 
     def _refresh_history(self):
         old_selection = self._selected
-        follow_newest = not self.search.get() and self._entries and old_selection == self._entries[0]
-        self._entries = self.app.history.recent()
         query = self.search.get().strip().casefold()
-        entries = [entry for entry in self._entries if query in entry.text.casefold()]
+        pinned = self.pinned_only.get()
+        follow_newest = not (query or pinned) and self._entries and old_selection == self._entries[0]
+        self._entries = self.app.history.recent()
+        entries = [entry for entry in self._entries if (entry.pinned or not pinned) and query in entry.text.casefold()]
+        self.recordings_folder.configure(state="normal" if self.app.history.audio_dir.is_dir() else "disabled")
 
         self.history_list.delete(*self.history_list.get_children())
         self._visible_entries.clear()
@@ -1016,7 +1029,8 @@ class DictateWindow:
             self.details_title.configure(text=entry.created_at.strftime("%d %B %Y · %H:%M"))
             self.details_model.configure(text=entry.model or "")
         else:
-            self.details_title.configure(text="No matches" if self.search.get().strip() else "No dictations yet")
+            empty_label = "No pinned dictations" if self.pinned_only.get() else "No dictations yet"
+            self.details_title.configure(text="No matches" if self.search.get().strip() else empty_label)
             self.details_model.configure(text="")
         self.copy_button.configure(state="normal" if entry else "disabled")
         self.replacement_button.configure(state="normal" if entry else "disabled")
@@ -1033,6 +1047,12 @@ class DictateWindow:
             self._refresh_history()
         elif entry:
             self.history_feedback.configure(text="Could not update this pin.")
+
+    def _open_recordings_folder(self):
+        try:
+            os.startfile(self.app.history.audio_dir)
+        except OSError:
+            self.history_feedback.configure(text="Could not open the recordings folder.")
 
     def _copy_selected(self):
         if self._selected:
