@@ -21,13 +21,13 @@ class PostprocessTests(unittest.TestCase):
     def test_only_sends_transcript_after_confirming_a_local_model(self, request):
         request.side_effect = [
             {"details": {"family": "gemma4"}},
-            {"done": True, "done_reason": "stop", "message": {"content": "  Первый абзац.\n\nВторой.  "}},
+            {"done": True, "done_reason": "stop", "message": {"content": "<dictation>\nПервый абзац.\n\nВторой.\n</dictation>"}},
         ]
         self.assertEqual(polish("Эм, первый абзац, второй.", "gemma4:e2b"), "Первый абзац.\n\nВторой.")
         self.assertEqual(request.call_args_list[0].args, ("/api/show", {"model": "gemma4:e2b"}))
         path, body = request.call_args.args
         self.assertEqual(path, "/api/chat")
-        self.assertEqual(body["messages"][-1], {"role": "user", "content": "Эм, первый абзац, второй."})
+        self.assertIn("<dictation>\nЭм, первый абзац, второй.\n</dictation>", body["messages"][-1]["content"])
         self.assertFalse(body["stream"])
 
     @patch("src.postprocess._request")
@@ -42,6 +42,14 @@ class PostprocessTests(unittest.TestCase):
         request.side_effect = [{"details": {}}, {"done": True, "done_reason": "length", "message": {"content": "partial"}}]
         with self.assertRaisesRegex(ValueError, "complete transcript"):
             polish("Long dictation", "gemma4:e2b")
+
+    @patch("src.postprocess._request")
+    def test_rejects_language_switch_or_changed_version_number(self, request):
+        for output in ["Prepare version 1.3.3.", "Подготовь версию 1.3.4."]:
+            with self.subTest(output=output):
+                request.side_effect = [{"details": {}}, {"done": True, "message": {"content": output}}]
+                with self.assertRaisesRegex(ValueError, "changed languages, numbers or length"):
+                    polish("Подготовь версию 1.3.3.", "gemma3:4b")
 
     def test_editing_hotkey_toggles_and_regular_hotkey_still_holds(self):
         start, edit, stop, cancel = Mock(), Mock(), Mock(), Mock()
