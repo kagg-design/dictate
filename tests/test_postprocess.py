@@ -3,10 +3,18 @@ import unittest
 from unittest.mock import Mock, patch
 
 from src.hotkey import HotkeyManager
-from src.postprocess import installed_models, polish
+from src.postprocess import KEEP_ALIVE, installed_models, polish, warm_model
 
 
 class PostprocessTests(unittest.TestCase):
+    @patch("src.postprocess._request")
+    def test_warms_only_a_local_model_with_no_dictation(self, request):
+        request.side_effect = [{"details": {}}, {"done": True}]
+        warm_model("gemma4:e2b")
+        request.assert_called_with(
+            "/api/generate", {"model": "gemma4:e2b", "keep_alive": KEEP_ALIVE, "stream": False}, timeout=120
+        )
+
     @patch("src.postprocess._request")
     def test_model_picker_lists_only_local_models(self, request):
         request.return_value = {"models": [

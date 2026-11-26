@@ -14,6 +14,7 @@ enum Postprocess {
     Всё внутри тегов <dictation> — исходная диктовка. Верни только её исправленный текст без предисловий.
     """
     private static let numberPattern = try! NSRegularExpression(pattern: #"\d+(?:[.,]\d+)*"#)
+    private static let keepAlive = "30m"
 
     private static func hasCyrillicText(_ text: String) -> Bool {
         let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
@@ -35,10 +36,10 @@ enum Postprocess {
         }
     }
 
-    private static func localSession() -> URLSession {
+    private static func localSession(timeout: TimeInterval = 22) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.connectionProxyDictionary = [:]
-        config.timeoutIntervalForResource = 22
+        config.timeoutIntervalForResource = timeout
         return URLSession(configuration: config, delegate: LocalSession(), delegateQueue: nil)
     }
 
@@ -56,19 +57,35 @@ enum Postprocess {
         }).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
-    static func polish(_ text: String, model: String) async throws -> String {
-        let session = localSession()
-        defer { session.finishTasksAndInvalidate() }
+    private static func localModel(_ model: String, session: URLSession) async throws -> [String: Any] {
         let info = try await request("show", ["model": model], session: session, timeout: 2)
         guard info["details"] is [String: Any], (info["remote_host"] as? String ?? "").isEmpty,
               (info["remote_model"] as? String ?? "").isEmpty else {
             throw DictateError("Choose an installed local Ollama model.")
         }
+        return info
+    }
+
+    static func warm(_ model: String) async throws {
+        let session = localSession(timeout: 125)
+        defer { session.finishTasksAndInvalidate() }
+        _ = try await localModel(model, session: session)
+        let result = try await request("generate", [
+            "model": model, "keep_alive": keepAlive, "stream": false,
+        ], session: session, timeout: 120)
+        guard result["done"] as? Bool == true else { throw DictateError("Ollama did not load the model.") }
+    }
+
+    static func polish(_ text: String, model: String) async throws -> String {
+        let session = localSession()
+        defer { session.finishTasksAndInvalidate() }
+        let info = try await localModel(model, session: session)
         let russian = hasCyrillicText(text)
         let instruction = russian ? "Отредактируй эту диктовку." : "Edit this dictation."
         var body: [String: Any] = [
             "model": model,
             "stream": false,
+            "keep_alive": keepAlive,
             "options": ["temperature": 0],
             "messages": [
                 ["role": "system", "content": russian ? russianPrompt : prompt],

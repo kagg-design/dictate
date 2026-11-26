@@ -3,6 +3,9 @@
 from http.client import HTTPConnection, HTTPException
 import json
 import re
+from threading import Condition, Thread
+
+from src.logger import logger
 
 
 PROMPT = (
@@ -19,6 +22,7 @@ RUSSIAN_PROMPT = (
 )
 NUMBERS = re.compile(r"\d+(?:[.,]\d+)*")
 WRAPPED_DICTATION = re.compile(r"<dictation>\s*(.*?)\s*</dictation>", re.DOTALL | re.IGNORECASE)
+KEEP_ALIVE = "30m"
 
 
 def _has_cyrillic_text(text):
@@ -80,17 +84,73 @@ def installed_models():
         raise ValueError("Could not list installed Ollama models.") from exc
 
 
+def _local_model(model):
+    info = _request("/api/show", {"model": model}, timeout=2)
+    if not isinstance(info.get("details"), dict) or info.get("remote_host") or info.get("remote_model"):
+        raise ValueError("Choose an installed local Ollama model.")
+    return info
+
+
+def warm_model(model):
+    """Load a local model with an empty request and no dictated text."""
+    _local_model(model)
+    result = _request("/api/generate", {"model": model, "keep_alive": KEEP_ALIVE, "stream": False}, timeout=120)
+    if result.get("done") is not True:
+        raise ValueError("Ollama did not load the model.")
+
+
+class PostprocessWarmup:
+    """Keep the selected model warm independently of speech recognition."""
+
+    def __init__(self):
+        self._condition = Condition()
+        self._thread = None
+        self._model = ""
+        self._closed = False
+
+    def select(self, model):
+        with self._condition:
+            if self._closed or self._model == model:
+                return
+            self._model = model
+            if self._thread is None:
+                self._thread = Thread(target=self._run, name="PostprocessWarmup", daemon=True)
+                self._thread.start()
+            self._condition.notify()
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._condition.notify()
+
+    def _run(self):
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or self._model)
+                if self._closed:
+                    return
+                model = self._model
+            try:
+                warm_model(model)
+                logger.info("Local post-processing model warmed: %s", model)
+                refresh_after = 20 * 60
+            except (OSError, HTTPException, ValueError) as exc:
+                logger.debug("Could not warm the local post-processing model: %s", exc)
+                refresh_after = 30
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or self._model != model, timeout=refresh_after)
+
+
 def polish(text, model):
     """Return the edited text, or raise without delivering partial output."""
     try:
-        info = _request("/api/show", {"model": model}, timeout=2)
-        if not isinstance(info.get("details"), dict) or info.get("remote_host") or info.get("remote_model"):
-            raise ValueError("Choose an installed local Ollama model.")
+        info = _local_model(model)
         capabilities = info.get("capabilities")
         thinking = {"think": False} if isinstance(capabilities, list) and "thinking" in capabilities else {}
         result = _request("/api/chat", {
             "model": model,
             "stream": False,
+            "keep_alive": KEEP_ALIVE,
             **thinking,
             "options": {"temperature": 0},
             "messages": editing_messages(text),

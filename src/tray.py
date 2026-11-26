@@ -12,7 +12,7 @@ from src.config import CUE_VOLUME_OPTIONS, save_recognition_model, save_settings
 from src.hotkey import validate_postprocess_shortcut
 from src.live_transcription import CompletedCapture, LiveTranscription
 from src.replacements import TextReplacements
-from src.postprocess import polish
+from src.postprocess import PostprocessWarmup, polish
 from src.shortcuts import validate_shortcuts
 
 
@@ -100,6 +100,7 @@ class SystemTrayApp:
         self.use_cursor_context = use_cursor_context
         self.replacements = TextReplacements.from_config(text_replacements, fuzzy_replacements)
         self.postprocess_model = postprocess_model.strip() if isinstance(postprocess_model, str) else ""
+        self._postprocess_warmup = PostprocessWarmup()
         self.preview_text = ""
         
         self.state = 'idle'
@@ -197,6 +198,7 @@ class SystemTrayApp:
             self.icon.title = f"Dictate · {label} ({engine.device.upper()})"
             logger.info("Speech model ready: %s (%s)", label, engine.device)
             self.show_notification("Dictate Ready", f"{label} on {engine.device.upper()}.")
+            self._postprocess_warmup.select(self.postprocess_model)
         finally:
             with self._capture_lock:
                 self._loading_model = False
@@ -321,6 +323,7 @@ class SystemTrayApp:
             else:
                 self.postprocess_model = model.strip()
                 hotkeys.configure_postprocessing(binding)
+                self._postprocess_warmup.select(self.postprocess_model)
                 self.settings_error = ""
 
     def set_wav_retention(self, days):
@@ -547,6 +550,7 @@ class SystemTrayApp:
         """
         logger.info("Shutdown requested. Initiating cleanup operations...")
         self.running = False
+        self._postprocess_warmup.close()
         
         # Stop keyboard hooks
         self.hotkey_manager.stop_listening()

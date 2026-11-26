@@ -130,6 +130,7 @@ final class DictateState: ObservableObject {
     private lazy var stopSound = NSSound(named: "Pop")
     private let backgroundAudio = BackgroundAudio()
     private var audioDucking: Task<Void, Never>?
+    private var postprocessWarmup: Task<Void, Never>?
 
     private final class Session {
         let target = InsertionTarget()
@@ -217,7 +218,10 @@ final class DictateState: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.restoreBackgroundAudio() }
+            MainActor.assumeIsolated {
+                self?.restoreBackgroundAudio()
+                self?.postprocessWarmup?.cancel()
+            }
         }
         refreshPermissions()
         chooseModel(selectedModel)
@@ -269,6 +273,7 @@ final class DictateState: ObservableObject {
                 modelReady = true
                 UserDefaults.standard.set(model.rawValue, forKey: "model")
                 status = "Ready to dictate"
+                warmPostprocessModel()
             } catch {
                 status = error.localizedDescription
             }
@@ -326,6 +331,25 @@ final class DictateState: ObservableObject {
     func setPostprocessModel(_ value: String) {
         postprocessModel = value.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(postprocessModel, forKey: "postprocessModel")
+        warmPostprocessModel()
+    }
+
+    private func warmPostprocessModel() {
+        postprocessWarmup?.cancel()
+        let model = postprocessModel
+        guard !model.isEmpty else { return }
+        postprocessWarmup = Task {
+            while !Task.isCancelled {
+                let delay: Duration
+                do {
+                    try await Postprocess.warm(model)
+                    delay = .seconds(20 * 60)
+                } catch {
+                    delay = .seconds(30)
+                }
+                try? await Task.sleep(for: delay)
+            }
+        }
     }
 
     func disablePostprocessShortcut() {
