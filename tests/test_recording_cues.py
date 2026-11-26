@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from threading import Event
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -7,6 +8,30 @@ from src.recording_cues import RecordingCuePlayer
 
 
 class RecordingCueTests(unittest.TestCase):
+    @patch("src.recording_cues._output_id", return_value="speakers")
+    @patch("src.recording_cues.C.WinDLL")
+    @patch("src.recording_cues._AudioVoice")
+    @patch("src.recording_cues.BackgroundAudio")
+    def test_preview_plays_both_cues_without_ducking_audio(self, background, factory, dll, output):
+        dll.return_value.CoInitializeEx.return_value = 0
+        voice = factory.return_value
+        voice.stalled.return_value = False
+        finished = Event()
+
+        def play(active, volume):
+            if not active:
+                finished.set()
+
+        voice.play.side_effect = play
+        player = RecordingCuePlayer(lambda: True, lambda: 0.5, lambda: True)
+        try:
+            player.preview()
+            self.assertTrue(finished.wait(timeout=2))
+        finally:
+            player.close()
+        self.assertEqual(voice.play.call_args_list, [call(True, 0.5), call(False, 0.5)])
+        background.return_value.lower.assert_not_called()
+
     @patch("src.recording_cues._output_id", return_value="speakers")
     @patch("src.recording_cues.C.WinDLL")
     @patch("src.recording_cues._AudioVoice")

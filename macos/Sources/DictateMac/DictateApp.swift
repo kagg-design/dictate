@@ -130,6 +130,7 @@ final class DictateState: ObservableObject {
     private lazy var stopSound = NSSound(named: "Pop")
     private let backgroundAudio = BackgroundAudio()
     private var audioDucking: Task<Void, Never>?
+    private var previewCueTask: Task<Void, Never>?
     private var postprocessWarmup: Task<Void, Never>?
 
     private final class Session {
@@ -220,6 +221,7 @@ final class DictateState: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.restoreBackgroundAudio()
+                self?.previewCueTask?.cancel()
                 self?.postprocessWarmup?.cancel()
             }
         }
@@ -426,6 +428,17 @@ final class DictateState: ObservableObject {
         UserDefaults.standard.set(volume, forKey: "recordingCueVolume")
     }
 
+    func previewRecordingSounds() {
+        guard !busy, recordingSounds, recordingCueVolume > 0 else { return }
+        previewCueTask?.cancel()
+        playRecordingSound(startSound, interrupting: stopSound)
+        previewCueTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, !self.busy, self.recordingSounds else { return }
+            self.playRecordingSound(self.stopSound, interrupting: self.startSound)
+        }
+    }
+
     func setDuckBackgroundAudio(_ enabled: Bool) {
         duckBackgroundAudio = enabled
         UserDefaults.standard.set(enabled, forKey: "duckBackgroundAudio")
@@ -577,6 +590,7 @@ final class DictateState: ObservableObject {
         }
         do {
             let session = Session(model: selectedModel, postprocessModel: postprocess ? postprocessModel : "")
+            previewCueTask?.cancel()
             try recorder.start()
             self.session = session
             recording = true
@@ -769,6 +783,8 @@ private struct DictateWindow: View {
                         Text("\(volume)%").tag(volume)
                     }
                 }.disabled(!state.recordingSounds)
+                Button("Test sounds", action: state.previewRecordingSounds)
+                    .disabled(!state.recordingSounds || state.recordingCueVolume == 0)
                 Toggle("Lower background audio while recording",
                        isOn: Binding(get: { state.duckBackgroundAudio }, set: state.setDuckBackgroundAudio))
                 Toggle("Use text around the cursor",

@@ -19,6 +19,7 @@ RECORDING_CUES = {
     True: APP_ROOT / "assets" / "sounds" / "recording-start.wav",
     False: APP_ROOT / "assets" / "sounds" / "recording-stop.wav",
 }
+PREVIEW_CUES = object()
 
 
 class _WaveFormat(C.Structure):
@@ -139,6 +140,9 @@ class RecordingCuePlayer:
     def set_recording(self, active):
         self._events.put(active)
 
+    def preview(self):
+        self._events.put(PREVIEW_CUES)
+
     def close(self):
         self._events.put(None)
         self._thread.join(timeout=1)
@@ -153,6 +157,34 @@ class RecordingCuePlayer:
         other_audio = BackgroundAudio()
         retry_at = 0.0
         recording = False
+        preview_stop_at = None
+
+        def play_cue(active):
+            nonlocal voice, retry_at
+            volume = self._volume()
+            if not self._enabled() or not volume:
+                return
+            current_output = _output_id() if initialized else None
+            if voice is not None and (voice.stalled() or current_output and current_output != voice_output):
+                voice.close()
+                voice = None
+                retry_at = 0.0
+            if voice is not None:
+                try:
+                    voice.play(active, volume)
+                    logger.debug("Recording cue queued on XAudio2: recording=%s", active)
+                    return
+                except OSError as exc:
+                    logger.warning("XAudio2 recording cue was not queued: %s", exc)
+                    voice.close()
+                    voice = None
+                    retry_at = monotonic() + 5
+            try:
+                _play_fallback(active, volume)
+                logger.debug("Recording cue played through Windows sound: recording=%s", active)
+            except (OSError, RuntimeError, EOFError, wave.Error):
+                logger.exception("Could not play the Dictate recording sound")
+
         try:
             while True:
                 if self._enabled():
@@ -168,39 +200,30 @@ class RecordingCuePlayer:
                     voice.close()
                     voice = None
                     retry_at = 0.0
+                timeout = 0.25
+                if preview_stop_at is not None:
+                    timeout = min(timeout, max(0, preview_stop_at - monotonic()))
                 try:
-                    active = self._events.get(timeout=0.25)
+                    active = self._events.get(timeout=timeout)
                 except Empty:
+                    if preview_stop_at is not None and monotonic() >= preview_stop_at:
+                        preview_stop_at = None
+                        play_cue(False)
                     continue
                 if active is None:
                     break
+                if active is PREVIEW_CUES:
+                    if not recording:
+                        play_cue(True)
+                        preview_stop_at = monotonic() + 0.3
+                    continue
                 if active == recording:
                     continue
+                preview_stop_at = None
                 recording = active
                 if not recording:
                     other_audio.restore()
-                volume = self._volume()
-                if self._enabled() and volume:
-                    current_output = _output_id() if initialized else None
-                    if voice is not None and (voice.stalled() or current_output and current_output != voice_output):
-                        voice.close()
-                        voice = None
-                        retry_at = 0.0
-                    if voice is not None:
-                        try:
-                            voice.play(recording, volume)
-                            logger.debug("Recording cue queued on XAudio2: recording=%s", recording)
-                        except OSError as exc:
-                            logger.warning("XAudio2 recording cue was not queued: %s", exc)
-                            voice.close()
-                            voice = None
-                            retry_at = monotonic() + 5
-                    try:
-                        if voice is None:
-                            _play_fallback(recording, volume)
-                            logger.debug("Recording cue played through Windows sound: recording=%s", recording)
-                    except (OSError, RuntimeError, EOFError, wave.Error):
-                        logger.exception("Could not play the Dictate recording sound")
+                play_cue(recording)
                 if recording and initialized and self._duck_audio():
                     other_audio.lower()
         finally:

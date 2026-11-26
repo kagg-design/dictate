@@ -79,6 +79,10 @@ class DesktopApp:
             player.set_recording(active)
         self._commands.put(active)
 
+    def preview_recording_sounds(self):
+        if self._cue_player is not None:
+            self._cue_player.preview()
+
     def close(self):
         if self._cue_player is not None:
             self._cue_player.close()
@@ -98,7 +102,7 @@ class DesktopApp:
             root.withdraw()
             window = DictateWindow(
                 root, app, appearance, window_position, window_page, replacements_window_position,
-                collapsed_settings_sections=collapsed_settings_sections,
+                collapsed_settings_sections=collapsed_settings_sections, preview_cues=self.preview_recording_sounds,
             )
             overlay = RecordingOverlay(root, font=window._styles.font)
             show_pending = False
@@ -144,8 +148,9 @@ class DesktopApp:
 
 class DictateWindow:
     def __init__(self, root, app, appearance="System", window_position=None, window_page="History",
-                 replacements_window_position=None, *, collapsed_settings_sections=()):
+                 replacements_window_position=None, *, collapsed_settings_sections=(), preview_cues=None):
         self.app = app
+        self._preview_cues = preview_cues
         self.window = tk.Toplevel(root)
         self.window.withdraw()
         self.window.title("Dictate")
@@ -401,6 +406,10 @@ class DictateWindow:
         self.cue_volume = self._settings_combo(
             row, 8, (f"{volume}%" for volume in CUE_VOLUME_OPTIONS), self._save_audio_feedback,
         )
+        self.test_sounds = ttk.Button(
+            row, text="Test sounds", style="Settings.TButton", command=self._preview_cues, state="disabled",
+        )
+        self.test_sounds.pack(side="left", padx=(8, 0))
         self.duck_audio = tk.BooleanVar(self.window)
         self.duck_option = self._settings_switch(
             audio, "Lower background audio while recording", self.duck_audio, self._save_audio_feedback,
@@ -979,6 +988,10 @@ class DictateWindow:
         self.recording_sounds.set(self.app.recording_sounds)
         self.cue_volume.configure(state="disabled" if busy or not self.app.recording_sounds else "readonly")
         self.cue_volume.set(f"{self.app.recording_cue_volume}%")
+        self.test_sounds.configure(
+            state="normal" if self._preview_cues and self.app.recording_sounds and self.app.recording_cue_volume
+            and not busy else "disabled",
+        )
         self.duck_option.configure(state="disabled" if busy else "normal")
         self.duck_audio.set(self.app.duck_background_audio)
         self.wav_retention.set(WAV_RETENTION_OPTIONS[self.app.history.audio_retention_days])
