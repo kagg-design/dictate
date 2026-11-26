@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 25
     env:
-      RELEASE_COMMIT: 1c726e12c8b6ca8ab98508242521edb356f282a4
+      RELEASE_COMMIT: ef97ec9e76c48cadd91e41e9ed2d21c805a0e60f
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
