@@ -12,7 +12,7 @@ import winsound
 from PIL import Image, ImageTk
 import yaml
 
-from src.config import save_settings
+from src.config import CUE_VOLUME_OPTIONS, save_settings
 from src.desktop_theme import (
     APPEARANCES,
     DesktopStyles,
@@ -55,7 +55,10 @@ class DesktopApp:
 
     def start(self, app, *, appearance="System", window_position=None, window_page="History",
               replacements_window_position=None, collapsed_settings_sections=()):
-        self._cue_player = RecordingCuePlayer(lambda: app.recording_sounds)
+        self._cue_player = RecordingCuePlayer(
+            lambda: app.recording_sounds, lambda: app.recording_cue_volume / 100,
+            lambda: app.duck_background_audio,
+        )
         self.thread = threading.Thread(
             target=self._run,
             args=(app, appearance, window_position, window_page, replacements_window_position, collapsed_settings_sections),
@@ -383,6 +386,14 @@ class DictateWindow:
         self.backend.pack(side="left", padx=(0, 10))
         self.model_labels = {key: label for key, (label, _) in self.app.models.items()}
         self.model = self._settings_combo(row, 24, self.model_labels.values(), self._change_model)
+        row = self._settings_row(audio, "Recording cue volume")
+        self.cue_volume = self._settings_combo(
+            row, 8, (f"{volume}%" for volume in CUE_VOLUME_OPTIONS), self._save_audio_feedback,
+        )
+        self.duck_audio = tk.BooleanVar(self.window)
+        self.duck_option = self._settings_switch(
+            audio, "Lower background audio while recording", self.duck_audio, self._save_audio_feedback,
+        )
 
         controls = canvas.add_section("dictation", "Dictation controls")
         self.shortcut_button = self._shortcut_button(controls, "Dictation shortcut", "shortcut")
@@ -444,6 +455,10 @@ class DictateWindow:
 
     def _set_wav_retention(self, event=None):
         self.app.set_wav_retention(tuple(WAV_RETENTION_OPTIONS)[self.wav_retention.current()])
+        self._refresh_settings(force=True)
+
+    def _save_audio_feedback(self, event=None):
+        self.app.set_audio_feedback(CUE_VOLUME_OPTIONS[self.cue_volume.current()], self.duck_audio.get())
         self._refresh_settings(force=True)
 
     def _settings_switch(self, parent, label, variable, command, *, detail=None):
@@ -907,6 +922,7 @@ class DictateWindow:
             hotkeys.shortcut, hotkeys.mode, hotkeys.insert_last_shortcut, hotkeys.escape_cancels,
             hotkeys.postprocess_shortcut, self.app.postprocess_model,
             self.app.live_preview, self.app.recording_sounds, self.app.use_cursor_context,
+            self.app.recording_cue_volume, self.app.duck_background_audio,
         )
         if not force and snapshot == self._settings_snapshot:
             return
@@ -950,6 +966,10 @@ class DictateWindow:
         self.escape_cancels.set(hotkeys.escape_cancels)
         self.preview.set(self.app.live_preview)
         self.recording_sounds.set(self.app.recording_sounds)
+        self.cue_volume.configure(state="disabled" if busy or not self.app.recording_sounds else "readonly")
+        self.cue_volume.set(f"{self.app.recording_cue_volume}%")
+        self.duck_option.configure(state="disabled" if busy else "normal")
+        self.duck_audio.set(self.app.duck_background_audio)
         self.wav_retention.set(WAV_RETENTION_OPTIONS[self.app.history.audio_retention_days])
         self.cursor_context.set(self.app.use_cursor_context)
         self.start_at_login.set(bool(self._startup_path and self._startup_path.is_file()))

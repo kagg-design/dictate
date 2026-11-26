@@ -85,6 +85,7 @@ private struct DictateMenu: View {
 @MainActor
 final class DictateState: ObservableObject {
     enum ShortcutSlot: Equatable { case dictation, insertLast, postprocess }
+    static let cueVolumeOptions = [0, 25, 50, 75, 100]
 
     @Published private(set) var selectedModel: SpeechModel
     @Published private(set) var preRoll: Int
@@ -99,6 +100,8 @@ final class DictateState: ObservableObject {
     @Published private(set) var escapeCancels: Bool
     @Published private(set) var livePreview: Bool
     @Published private(set) var recordingSounds: Bool
+    @Published private(set) var recordingCueVolume = 100
+    @Published private(set) var duckBackgroundAudio = false
     @Published private(set) var useCursorContext: Bool
     @Published private(set) var replacements: TextReplacements
     @Published private(set) var loginEnabled = false
@@ -125,6 +128,8 @@ final class DictateState: ObservableObject {
     private var insertingLast = false
     private lazy var startSound = NSSound(named: "Tink")
     private lazy var stopSound = NSSound(named: "Pop")
+    private let backgroundAudio = BackgroundAudio()
+    private var audioDucking: Task<Void, Never>?
 
     private final class Session {
         let target = InsertionTarget()
@@ -171,6 +176,9 @@ final class DictateState: ObservableObject {
         escapeCancels = defaults.object(forKey: "escapeCancels") as? Bool ?? true
         livePreview = defaults.bool(forKey: "livePreview")
         recordingSounds = defaults.object(forKey: "recordingSounds") as? Bool ?? true
+        let cueVolume = defaults.object(forKey: "recordingCueVolume") as? Int ?? 100
+        if Self.cueVolumeOptions.contains(cueVolume) { recordingCueVolume = cueVolume }
+        duckBackgroundAudio = defaults.bool(forKey: "duckBackgroundAudio")
         useCursorContext = defaults.object(forKey: "useCursorContext") as? Bool ?? true
         replacements = TextReplacements(
             defaults.dictionary(forKey: "textReplacements") as? [String: String] ?? [:],
@@ -205,6 +213,11 @@ final class DictateState: ObservableObject {
                 case .insertLast: self?.insertLatest()
                 }
             }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restoreBackgroundAudio() }
         }
         refreshPermissions()
         chooseModel(selectedModel)
@@ -384,6 +397,16 @@ final class DictateState: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "recordingSounds")
     }
 
+    func setRecordingCueVolume(_ volume: Int) {
+        recordingCueVolume = volume
+        UserDefaults.standard.set(volume, forKey: "recordingCueVolume")
+    }
+
+    func setDuckBackgroundAudio(_ enabled: Bool) {
+        duckBackgroundAudio = enabled
+        UserDefaults.standard.set(enabled, forKey: "duckBackgroundAudio")
+    }
+
     func setUseCursorContext(_ enabled: Bool) {
         useCursorContext = enabled
         UserDefaults.standard.set(enabled, forKey: "useCursorContext")
@@ -537,6 +560,7 @@ final class DictateState: ObservableObject {
             if preview == nil { preview = DictationPreview() }
             preview?.showRecording()
             if recordingSounds { playRecordingSound(startSound, interrupting: stopSound) }
+            lowerBackgroundAudio()
         } catch {
             shortcut.disarm()
             status = error.localizedDescription
@@ -573,6 +597,7 @@ final class DictateState: ObservableObject {
         status = "Finishing dictation…"
         let interrupted = recorder.interrupted
         let samples = recorder.stop()
+        restoreBackgroundAudio()
         if recordingSounds { playRecordingSound(stopSound, interrupting: startSound) }
         if Date().timeIntervalSince(session.date) < 0.3 {
             finishing = false
@@ -637,8 +662,25 @@ final class DictateState: ObservableObject {
 
     private func playRecordingSound(_ sound: NSSound?, interrupting previous: NSSound?) {
         previous?.stop()
-        sound?.volume = 0.35
+        guard recordingCueVolume > 0 else { return }
+        sound?.volume = 0.35 * Float(recordingCueVolume) / 100
         sound?.play()
+    }
+
+    private func lowerBackgroundAudio() {
+        guard duckBackgroundAudio else { return }
+        let cueDuration = recordingSounds && recordingCueVolume > 0 ? startSound?.duration ?? 0 : 0
+        audioDucking = Task { [weak self] in
+            if cueDuration > 0 { try? await Task.sleep(for: .seconds(cueDuration)) }
+            guard !Task.isCancelled, let self, self.recording else { return }
+            self.backgroundAudio.lower()
+        }
+    }
+
+    private func restoreBackgroundAudio() {
+        audioDucking?.cancel()
+        audioDucking = nil
+        backgroundAudio.restore()
     }
 }
 
@@ -696,6 +738,14 @@ private struct DictateWindow: View {
                        isOn: Binding(get: { state.livePreview }, set: state.setLivePreview))
                 Toggle("Play recording sounds",
                        isOn: Binding(get: { state.recordingSounds }, set: state.setRecordingSounds))
+                Picker("Recording cue volume",
+                       selection: Binding(get: { state.recordingCueVolume }, set: state.setRecordingCueVolume)) {
+                    ForEach(DictateState.cueVolumeOptions, id: \.self) { volume in
+                        Text("\(volume)%").tag(volume)
+                    }
+                }.disabled(!state.recordingSounds)
+                Toggle("Lower background audio while recording",
+                       isOn: Binding(get: { state.duckBackgroundAudio }, set: state.setDuckBackgroundAudio))
                 Toggle("Use text around the cursor",
                        isOn: Binding(get: { state.useCursorContext }, set: state.setUseCursorContext))
             }

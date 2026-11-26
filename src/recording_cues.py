@@ -1,6 +1,8 @@
 """Preload the recording cues and play them outside the Tk and microphone threads."""
 
 import ctypes as C
+from array import array
+from io import BytesIO
 from queue import Empty, SimpleQueue
 from threading import Thread
 from time import monotonic
@@ -9,6 +11,7 @@ import winsound
 
 from src.logger import logger
 from src.paths import APP_ROOT
+from src.background_audio import BackgroundAudio, audio_method as _method, check_audio_result as _check
 
 
 RECORDING_CUES = {
@@ -34,16 +37,6 @@ class _AudioBuffer(C.Structure):
         ("loop_begin", C.c_uint32), ("loop_length", C.c_uint32), ("loop_count", C.c_uint32),
         ("context", C.c_void_p),
     ]
-
-
-def _method(instance, slot, result, *arguments):
-    vtable = C.cast(instance, C.POINTER(C.POINTER(C.c_void_p))).contents
-    return C.WINFUNCTYPE(result, C.c_void_p, *arguments)(vtable[slot])
-
-
-def _check(result, operation):
-    if result < 0:
-        raise OSError(f"{operation} returned 0x{result & 0xffffffff:08x}")
 
 
 class _AudioVoice:
@@ -81,12 +74,14 @@ class _AudioVoice:
             _check(make_source(self.engine, C.byref(self.source), C.byref(fmt), 0, 2.0, None, None, None),
                    "CreateSourceVoice")
             _check(_method(self.source, 19, hresult, uint, uint)(self.source, 0, 0), "Start")
+            self.set_volume = _method(self.source, 12, hresult, C.c_float, uint)
             self.submit = _method(self.source, 21, hresult, C.POINTER(_AudioBuffer), C.c_void_p)
         except BaseException:
             self.close()
             raise
 
-    def play(self, recording):
+    def play(self, recording, volume):
+        _check(self.set_volume(self.source, volume, 0), "SetVolume")
         _check(self.submit(self.source, C.byref(self.buffers[recording]), None), "SubmitSourceBuffer")
 
     def close(self):
@@ -99,9 +94,22 @@ class _AudioVoice:
             self.engine.value = None
 
 
+def _play_fallback(recording, volume):
+    with wave.open(str(RECORDING_CUES[recording]), "rb") as original:
+        samples = array("h", original.readframes(original.getnframes()))
+        scaled = array("h", (round(sample * volume) for sample in samples))
+        buffer = BytesIO()
+        with wave.open(buffer, "wb") as cue:
+            cue.setparams(original.getparams())
+            cue.writeframes(scaled.tobytes())
+    winsound.PlaySound(buffer.getvalue(), winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+
+
 class RecordingCuePlayer:
-    def __init__(self, enabled):
+    def __init__(self, enabled, volume, duck_audio):
         self._enabled = enabled
+        self._volume = volume
+        self._duck_audio = duck_audio
         self._events = SimpleQueue()
         self._thread = Thread(target=self._run, name="RecordingCues", daemon=True)
         self._thread.start()
@@ -119,6 +127,7 @@ class RecordingCuePlayer:
         ole32.CoInitializeEx.restype = C.c_long
         initialized = ole32.CoInitializeEx(None, 0) >= 0
         voice = None
+        other_audio = BackgroundAudio()
         retry_at = 0.0
         recording = False
         try:
@@ -145,20 +154,24 @@ class RecordingCuePlayer:
                 if active == recording:
                     continue
                 recording = active
-                if not self._enabled() or monotonic() - received_at > 0.25:
-                    continue
-                try:
-                    if voice is not None:
-                        voice.play(recording)
-                    else:
-                        winsound.PlaySound(str(RECORDING_CUES[recording]),
-                                           winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-                except (OSError, RuntimeError):
-                    logger.exception("Could not play the Dictate recording sound")
-                    if voice is not None:
-                        voice.close()
-                        voice = None
+                if not recording:
+                    other_audio.restore()
+                volume = self._volume()
+                if self._enabled() and volume and monotonic() - received_at <= 0.25:
+                    try:
+                        if voice is not None:
+                            voice.play(recording, volume)
+                        else:
+                            _play_fallback(recording, volume)
+                    except (OSError, RuntimeError, EOFError, wave.Error):
+                        logger.exception("Could not play the Dictate recording sound")
+                        if voice is not None:
+                            voice.close()
+                            voice = None
+                if recording and initialized and self._duck_audio():
+                    other_audio.lower()
         finally:
+            other_audio.restore()
             if voice is not None:
                 voice.close()
             if initialized:

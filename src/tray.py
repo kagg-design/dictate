@@ -8,7 +8,7 @@ from src.logger import logger
 from src.inserter import InsertionTarget, current_insertion_target, paste_text, restore_tray_insertion_target
 from src.clipboard import copy_text
 from src.history import DictationHistory
-from src.config import save_recognition_model, save_settings
+from src.config import CUE_VOLUME_OPTIONS, save_recognition_model, save_settings
 from src.hotkey import validate_postprocess_shortcut
 from src.live_transcription import CompletedCapture, LiveTranscription
 from src.replacements import TextReplacements
@@ -64,6 +64,7 @@ class SystemTrayApp:
         fuzzy_replacements=(),
         wav_retention_days=0,
         postprocess_model="",
+        recording_cue_volume=100, duck_background_audio=False,
     ):
         """
         Coordinates the system tray interface, state changes, and background tasks.
@@ -92,6 +93,10 @@ class SystemTrayApp:
         self.save_wav = save_wav
         self.live_preview = live_preview
         self.recording_sounds = recording_sounds
+        self.recording_cue_volume = (
+            recording_cue_volume if type(recording_cue_volume) is int and recording_cue_volume in CUE_VOLUME_OPTIONS else 100
+        )
+        self.duck_background_audio = duck_background_audio
         self.use_cursor_context = use_cursor_context
         self.replacements = TextReplacements.from_config(text_replacements, fuzzy_replacements)
         self.postprocess_model = postprocess_model.strip() if isinstance(postprocess_model, str) else ""
@@ -288,6 +293,17 @@ class SystemTrayApp:
             "fuzzy_replacements": sorted(replacements.fuzzy_sources),
         })
         self.replacements = replacements
+
+    def set_audio_feedback(self, volume, duck):
+        try:
+            save_settings({"recording_cue_volume": volume, "duck_background_audio": duck})
+        except (OSError, ValueError):
+            logger.exception("Could not save recording audio settings")
+            self.settings_error = "Could not save recording audio settings."
+        else:
+            self.recording_cue_volume = volume
+            self.duck_background_audio = duck
+            self.settings_error = ""
 
     def set_postprocessing(self, model, binding):
         with self._capture_lock:

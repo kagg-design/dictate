@@ -334,6 +334,8 @@ def main():
         wav_retention_days=config["wav_retention_days"],
         live_preview=config["live_preview"] is True,
         recording_sounds=config["recording_sounds"] is not False,
+        recording_cue_volume=config["recording_cue_volume"],
+        duck_background_audio=config["duck_background_audio"] is True,
         use_cursor_context=config["use_cursor_context"] is not False,
         text_replacements=config["text_replacements"],
         fuzzy_replacements=config["fuzzy_replacements"],

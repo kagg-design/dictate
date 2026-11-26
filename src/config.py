@@ -9,6 +9,7 @@ from src.shortcuts import DEFAULT_INSERT_LAST_SHORTCUT, DEFAULT_SHORTCUT
 
 DEFAULT_CONFIG_PATH = DATA_DIR / "config.yaml"
 _config_lock = threading.Lock()
+CUE_VOLUME_OPTIONS = (0, 25, 50, 75, 100)
 
 DEFAULT_CONFIG = {
     "hotkey": DEFAULT_SHORTCUT,
@@ -17,6 +18,8 @@ DEFAULT_CONFIG = {
     "escape_cancels": True,
     "live_preview": False,
     "recording_sounds": True,
+    "recording_cue_volume": 100,
+    "duck_background_audio": False,
     "use_cursor_context": True,
     "text_replacements": {},
     "fuzzy_replacements": [],
