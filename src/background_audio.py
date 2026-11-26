@@ -44,22 +44,43 @@ def _query(instance, iid):
     return _interface(query, instance, iid.bytes_le)
 
 
+@contextmanager
+def _default_output():
+    ptr, pointer = C.c_void_p, C.POINTER(C.c_void_p)
+    create = C.WinDLL("ole32").CoCreateInstance
+    create.argtypes = (ptr, ptr, C.c_uint32, ptr, pointer)
+    create.restype = C.c_long
+    with _interface(create, CLSID_DEVICE_ENUMERATOR.bytes_le, None, 1, IID_DEVICE_ENUMERATOR.bytes_le) as devices:
+        default = audio_method(devices, 4, C.c_long, C.c_int, C.c_int, pointer)
+        with _interface(default, devices, 0, 1) as device:  # eRender, eMultimedia
+            yield device
+
+
+def default_output_id():
+    with _default_output() as device:
+        identity = C.c_void_p()
+        get_id = audio_method(device, 5, C.c_long, C.POINTER(C.c_void_p))
+        check_audio_result(get_id(device, C.byref(identity)), "IMMDevice::GetId")
+        try:
+            return C.wstring_at(identity)
+        finally:
+            free = C.WinDLL("ole32").CoTaskMemFree
+            free.argtypes = (C.c_void_p,)
+            free.restype = None
+            free(identity)
+
+
 class BackgroundAudio:
     def __init__(self):
         self._sessions = []
 
     def lower(self):
         uint, ptr, pointer = C.c_uint32, C.c_void_p, C.POINTER(C.c_void_p)
-        create = C.WinDLL("ole32").CoCreateInstance
-        create.argtypes = (ptr, ptr, uint, ptr, pointer)
-        create.restype = C.c_long
         try:
-            with _interface(create, CLSID_DEVICE_ENUMERATOR.bytes_le, None, 1, IID_DEVICE_ENUMERATOR.bytes_le) as devices:
-                default = audio_method(devices, 4, C.c_long, C.c_int, C.c_int, pointer)
-                with _interface(default, devices, 0, 1) as device:  # eRender, eMultimedia
-                    activate = audio_method(device, 3, C.c_long, ptr, uint, ptr, pointer)
-                    with _interface(activate, device, IID_SESSION_MANAGER.bytes_le, 1, None) as manager:
-                        self._lower_sessions(manager)
+            with _default_output() as device:
+                activate = audio_method(device, 3, C.c_long, ptr, uint, ptr, pointer)
+                with _interface(activate, device, IID_SESSION_MANAGER.bytes_le, 1, None) as manager:
+                    self._lower_sessions(manager)
         except OSError as exc:
             logger.debug("Could not lower background audio: %s", exc)
 
