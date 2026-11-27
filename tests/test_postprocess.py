@@ -7,8 +7,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 from src.gemma import LocalGemma
-from src.hotkey import HotkeyManager
+from src.hotkey import HotkeyManager, validate_postprocess_shortcut
 from src.postprocess import KEEP_ALIVE, installed_models, polish, warm_model
+from src.shortcuts import Shortcut
 
 
 class PostprocessTests(unittest.TestCase):
@@ -117,3 +118,44 @@ class PostprocessTests(unittest.TestCase):
         key("left ctrl", 29, "up")
         start.assert_called_once_with()
         self.assertEqual(stop.call_count, 2)
+
+    @patch("src.hotkey.mask_start_menu")
+    def test_modifier_only_editing_shortcut_uses_release_and_keeps_copy_shortcut(self, mask):
+        start, edit, stop, copy = Mock(), Mock(), Mock(), Mock()
+        manager = HotkeyManager(
+            start, stop, on_copy=copy, on_postprocess_start=edit, shortcut="shift+win",
+            postprocess_shortcut="ctrl+win",
+        )
+
+        def key(name, code, event_type):
+            return manager._handle_event(SimpleNamespace(name=name, scan_code=code, event_type=event_type))
+
+        self.assertTrue(key("left windows", 91, "down"))
+        self.assertTrue(key("left ctrl", 29, "down"))
+        edit.assert_not_called()
+        mask.assert_called_once()
+        self.assertTrue(key("left windows", 91, "up"))
+        key("left ctrl", 29, "up")
+        edit.assert_called_once_with()
+
+        key("left ctrl", 29, "down")
+        key("left windows", 91, "down")
+        self.assertFalse(key("м", 47, "down"))
+        key("м", 47, "up")
+        self.assertTrue(key("left ctrl", 29, "up"))
+        self.assertTrue(key("left windows", 91, "up"))
+        copy.assert_called_once_with()
+        stop.assert_not_called()
+
+        key("left ctrl", 29, "down")
+        key("left windows", 91, "down")
+        self.assertTrue(key("left ctrl", 29, "up"))
+        self.assertTrue(key("left windows", 91, "up"))
+        stop.assert_called_once_with()
+        start.assert_not_called()
+
+    def test_editing_binding_rejects_an_overlapping_modifier_only_dictation(self):
+        with self.assertRaisesRegex(ValueError, "separate shortcut"):
+            validate_postprocess_shortcut(
+                Shortcut.from_setting("ctrl+win+shift"), Shortcut.from_setting("ctrl+win"), None,
+            )

@@ -19,8 +19,15 @@ KEEP_INSERT_SHORTCUT = object()
 
 
 def validate_postprocess_shortcut(binding, dictation, insert_last):
-    if binding and (binding.key is None or any(binding.conflicts(other) for other in (dictation, insert_last, COPY_LAST))):
-        raise ValueError("Choose a separate post-processing shortcut with a non-modifier key.")
+    if binding is None:
+        return
+    if binding == COPY_LAST:
+        raise ValueError("Ctrl+Win+V is assigned to Copy Last Dictation.")
+    for other in (dictation, insert_last):
+        if other is None:
+            continue
+        if binding == other or (other.key is None and (binding.conflicts(other) or other.conflicts(binding))):
+            raise ValueError("Choose a separate shortcut for post-processing.")
 
 
 class HotkeyManager:
@@ -59,6 +66,7 @@ class HotkeyManager:
         self._chord_down = False
         self._toggle_armed = False
         self._insert_armed = False
+        self._postprocess_armed = False
         self._hold_started = 0.0
         self._capture = None
         self._capture_size = 0
@@ -80,6 +88,7 @@ class HotkeyManager:
             # Disarm a combination already held while applying the settings.
             self._chord_down = self._matches(self.shortcut, MODIFIERS.intersection(self._pressed.values()))
             self._toggle_armed = self._insert_armed = False
+            self._postprocess_armed = False
 
     def begin_capture(self, results):
         with self._state_lock:
@@ -89,11 +98,13 @@ class HotkeyManager:
             self._capture_size = 0
             self._capture_result = None
             self._toggle_armed = self._insert_armed = False
+            self._postprocess_armed = False
             return True
 
     def configure_postprocessing(self, binding):
         with self._state_lock:
             self.postprocess_shortcut = binding
+            self._postprocess_armed = False
 
     def cancel_capture(self):
         with self._state_lock:
@@ -122,6 +133,7 @@ class HotkeyManager:
             self._suppressed.clear()
             self.is_active = self._chord_down = self._toggle_armed = self._insert_armed = False
             self._postprocessing_active = False
+            self._postprocess_armed = False
             self._capture = None
 
     def set_paused(self, paused):
@@ -132,6 +144,7 @@ class HotkeyManager:
                 self.is_active = False
                 self._postprocessing_active = False
             self._toggle_armed = False
+            self._postprocess_armed = False
         if stop:
             self._schedule(self.on_trigger_stop)
 
@@ -141,6 +154,7 @@ class HotkeyManager:
             self.is_active = False
             self._toggle_armed = False
             self._postprocessing_active = False
+            self._postprocess_armed = False
 
     def _matches(self, shortcut, modifiers):
         return shortcut.modifiers == modifiers and (shortcut.key is None or shortcut.key in self._pressed)
@@ -167,17 +181,35 @@ class HotkeyManager:
         shortcut = self.insert_last_shortcut
         if shortcut is None or self.on_insert is None:
             return False
+        triggered, self._insert_armed = self._action_triggered(
+            shortcut, self._insert_armed, down, repeat, key, name, modifiers,
+        )
+        return triggered
+
+    def _postprocess_triggered(self, down, repeat, key, name, modifiers):
+        shortcut = self.postprocess_shortcut
+        if (shortcut is None or self.on_postprocess_start is None or self.paused
+                or (self.is_active and not self._postprocessing_active)):
+            self._postprocess_armed = False
+            return False
+        triggered, self._postprocess_armed = self._action_triggered(
+            shortcut, self._postprocess_armed, down, repeat, key, name, modifiers,
+        )
+        return triggered
+
+    def _action_triggered(self, shortcut, armed, down, repeat, key, name, modifiers):
         if shortcut.key is not None:
-            return down and not repeat and key == shortcut.key and modifiers == shortcut.modifiers
+            triggered = down and not repeat and key == shortcut.key and modifiers == shortcut.modifiers
+            return triggered, False
         if down and not repeat:
-            self._insert_armed = (
+            armed = (
                 name in MODIFIERS and modifiers == shortcut.modifiers
                 and all(value in MODIFIERS for value in self._pressed.values())
             )
-        elif not down and self._insert_armed and modifiers != shortcut.modifiers:
-            self._insert_armed = False
-            return True
-        return False
+        elif not down and armed and modifiers != shortcut.modifiers:
+            # An ordinary key can still turn a modifier chord into another shortcut.
+            return True, False
+        return False, armed
 
     def _handle_event(self, event):
         # The Windows hook only tracks keys and queues actions. Recording and
@@ -223,12 +255,7 @@ class HotkeyManager:
                 and self.on_copy is not None
             )
             inserting = self._insert_triggered(down, repeat, key, name, modifiers)
-            post = self.postprocess_shortcut
-            processing = (
-                post is not None and self.on_postprocess_start is not None and not self.paused
-                and down and not repeat and key == post.key and modifiers == post.modifiers
-                and (not self.is_active or self._postprocessing_active)
-            )
+            processing = self._postprocess_triggered(down, repeat, key, name, modifiers)
             activating = (
                 self._chord_down and not previous and down and not repeat and not self.paused
                 and not self._postprocessing_active
@@ -236,7 +263,7 @@ class HotkeyManager:
             )
 
             if processing:
-                consume = True
+                consume |= down and name not in MODIFIERS
                 self.is_active = not self.is_active
                 self._postprocessing_active = self.is_active
                 self._toggle_armed = False
@@ -288,7 +315,8 @@ class HotkeyManager:
                 self._suppressed.add(key)
             elif not down:
                 self._suppressed.discard(key)
-            mask_menu = (copying or inserting or activating or processing or self._insert_armed) and any(
+            mask_menu = (copying or inserting or activating or self._insert_armed
+                         or (down and not repeat and (processing or self._postprocess_armed))) and any(
                 pressed_name == "win" and pressed_key not in self._suppressed
                 for pressed_key, pressed_name in self._pressed.items()
             )

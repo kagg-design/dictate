@@ -7,6 +7,7 @@ A Windows and macOS dictation app that runs Fluid Speech Mini or Whisper locally
 ### 0.3.1 (Windows)
 
 - The installer includes a local Gemma 4 E2B engine. Enable Gemma from Dictate settings and the app downloads and verifies the model automatically.
+- The editing shortcut accepts modifier-only combinations and toggles on release.
 - The tray and the dictation shortcut show when the speech model is loading. Dictate leaves a transcript in History if a Windows modifier blocks insertion for more than three seconds.
 
 ### 0.3.0
