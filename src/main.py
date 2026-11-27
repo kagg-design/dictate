@@ -271,6 +271,7 @@ def main():
                 on_limit_reached=on_limit_reached,
                 on_audio_start=on_audio_start,
                 postprocess=postprocess,
+                on_unavailable=desktop.show_status,
             )
         except Exception as e:
             logger.error(f"Failed to start recording: {e}")

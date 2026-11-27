@@ -5,6 +5,7 @@ import json
 import re
 from threading import Condition, Thread
 
+from src.gemma import GEMMA_MODEL, LocalGemma
 from src.logger import logger
 
 
@@ -49,6 +50,18 @@ def retains_transcript(text, edited):
         and not (len(edited) < len(text) * 0.5 or len(edited) > max(len(text) * 1.5, len(text) + 60))
         and original_numbers == edited_numbers
     )
+
+
+def _validated_edit(text, edited):
+    if not isinstance(edited, str) or not edited.strip():
+        raise ValueError("The editing model did not return a complete transcript.")
+    edited = edited.strip()
+    wrapper = WRAPPED_DICTATION.fullmatch(edited)
+    if wrapper:
+        edited = wrapper[1]
+    if not retains_transcript(text, edited):
+        raise ValueError("The edited dictation changed languages, numbers or length.")
+    return edited
 
 
 def _request(path, data, *, timeout):
@@ -106,22 +119,50 @@ class PostprocessWarmup:
         self._condition = Condition()
         self._thread = None
         self._model = ""
+        self._gemma = None
         self._closed = False
+        self.status = ""
+        self.detail = ""
 
     def select(self, model):
         with self._condition:
             if self._closed or self._model == model:
                 return
+            previous_gemma = self._gemma
+            self._gemma = LocalGemma() if model == GEMMA_MODEL else None
             self._model = model
+            self.status = "loading" if model else ""
+            self.detail = ""
             if self._thread is None:
                 self._thread = Thread(target=self._run, name="PostprocessWarmup", daemon=True)
                 self._thread.start()
             self._condition.notify()
+        if previous_gemma is not None:
+            previous_gemma.close()
 
     def close(self):
         with self._condition:
             self._closed = True
             self._condition.notify()
+            gemma = self._gemma
+        if gemma is not None:
+            gemma.close()
+
+    def edit_gemma(self, text):
+        with self._condition:
+            gemma = self._gemma
+        if gemma is None:
+            raise ValueError("Gemma is turned off.")
+        try:
+            return _validated_edit(text, gemma.edit(editing_messages(text)))
+        except (OSError, HTTPException) as exc:
+            raise ValueError("The Gemma engine did not respond.") from exc
+
+    def _report_gemma(self, gemma, message):
+        with self._condition:
+            if not self._closed and self._gemma is gemma and self.detail != message:
+                self.status = "loading"
+                self.detail = message
 
     def _run(self):
         while True:
@@ -130,15 +171,30 @@ class PostprocessWarmup:
                 if self._closed:
                     return
                 model = self._model
+                gemma = self._gemma
             try:
-                warm_model(model)
-                logger.info("Local post-processing model warmed: %s", model)
+                if gemma is not None:
+                    gemma.prepare(lambda message: self._report_gemma(gemma, message))
+                else:
+                    warm_model(model)
+                if self.status != "ready":
+                    logger.info("Local post-processing model warmed: %s", model)
+                status = "ready"
+                detail = ""
                 refresh_after = 20 * 60
             except (OSError, HTTPException, ValueError) as exc:
                 logger.debug("Could not warm the local post-processing model: %s", exc)
+                status = "unavailable"
+                detail = "Gemma unavailable. Retrying…" if gemma is not None else ""
                 refresh_after = 30
             with self._condition:
-                self._condition.wait_for(lambda: self._closed or self._model != model, timeout=refresh_after)
+                if not self._closed and self._model == model and self._gemma is gemma:
+                    self.status = status
+                    self.detail = detail
+                self._condition.wait_for(
+                    lambda: self._closed or self._model != model or self._gemma is not gemma,
+                    timeout=refresh_after,
+                )
 
 
 def polish(text, model):
@@ -157,15 +213,8 @@ def polish(text, model):
         }, timeout=20)
         message = result.get("message")
         edited = message.get("content") if isinstance(message, dict) else None
-        if (result.get("done") is not True or result.get("done_reason") not in (None, "stop")
-                or not isinstance(edited, str) or not edited.strip()):
+        if result.get("done") is not True or result.get("done_reason") not in (None, "stop"):
             raise ValueError("Ollama did not return a complete transcript.")
-        edited = edited.strip()
-        wrapper = WRAPPED_DICTATION.fullmatch(edited)
-        if wrapper:
-            edited = wrapper[1]
-        if not retains_transcript(text, edited):
-            raise ValueError("The edited dictation changed languages, numbers or length.")
-        return edited
+        return _validated_edit(text, edited)
     except (OSError, HTTPException) as exc:
         raise ValueError("The local Ollama server did not respond.") from exc

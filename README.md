@@ -4,6 +4,11 @@ A Windows and macOS dictation app that runs Fluid Speech Mini or Whisper locally
 
 ## Changes by version
 
+### 0.3.1 (Windows)
+
+- The installer includes a local Gemma 4 E2B engine. Enable Gemma from Dictate settings and the app downloads and verifies the model automatically.
+- The tray and the dictation shortcut show when the speech model is loading. Dictate leaves a transcript in History if a Windows modifier blocks insertion for more than three seconds.
+
 ### 0.3.0
 
 - Record shortcuts using two or three keys. Insert the last dictation from the tray or menu bar, or assign it a shortcut. Windows shortcuts follow the physical keys across keyboard layouts.
@@ -25,7 +30,7 @@ A Windows and macOS dictation app that runs Fluid Speech Mini or Whisper locally
 
 ## Install on macOS
 
-Download `Dictate-macOS-arm64-beta.dmg` from [GitHub Releases](https://github.com/kagg-design/dictate/releases). The beta runs on Apple Silicon with macOS 15 or later. Drag Dictate into Applications and follow the [macOS setup guide](macos/README.md) to grant its permissions.
+Download `Dictate-macOS-arm64-beta.dmg` from the [macOS beta release](https://github.com/kagg-design/dictate/releases/tag/v0.3.0). The beta runs on Apple Silicon with macOS 15 or later. Drag Dictate into Applications and follow the [macOS setup guide](macos/README.md) to grant its permissions.
 
 To build from source, select Xcode 26 or newer and make CMake available, then run `bash macos/build.sh`. The build writes the DMG and its SHA-256 file to `artifacts/macos/`.
 
@@ -103,7 +108,7 @@ This starts Dictate in the system tray. Click its icon or choose **Dictate** in 
 Build on an x64 Windows PC with Python 3.12 (including Tk) and [Inno Setup 6](https://jrsoftware.org/isdl.php). From the repository root, run this in PowerShell. Substitute the path to `ISCC.exe` if necessary.
 
 ```powershell
-py -3.12 scripts/build_windows.py --compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' --version 0.3.0
+py -3.12 scripts/build_windows.py --compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' --version 0.3.1
 ```
 
 The build checks the packaged Python runtime and produces `Dictate-Setup-x64.exe` and `Dictate-Setup-x64.exe.sha256` in `artifacts/windows/`. Attach both files to a GitHub Release for the matching tag. The binary is a Release asset and stays out of the source tree.
@@ -142,7 +147,15 @@ To fix a spelling for future dictations, select a word or phrase in **History** 
 
 ### Local post-processing
 
-Start [Ollama](https://ollama.com/) and install a local text model. In **Settings → Local post-processing**, refresh the model list, select the model, and assign **Dictate with editing**. Press that shortcut once to start and again to finish. Dictate sends the transcript to Ollama on this computer. The ordinary dictation shortcut still inserts the recognized text directly.
+On Windows, open **Settings → Local post-processing** and click **Enable Gemma**. Dictate downloads about 3.5 GB of model weights once and runs Gemma locally using the llama.cpp engine included in the installer. When the status reads **Gemma ready**, press `Ctrl+Alt+F10` to start and again to finish. You can change this shortcut under **Dictate with editing**. Dictate loads Gemma on subsequent starts if editing stays enabled.
+
+To use a different local editing model, or to enable editing on macOS, install [Ollama](https://ollama.com/download) and launch it. To install Gemma for Ollama, run:
+
+```sh
+ollama pull gemma4:e2b-it-q4_K_M
+```
+
+In **Settings → Local post-processing**, select **Refresh**, choose `gemma4:e2b-it-q4_K_M`, and assign **Dictate with editing**. Press that shortcut once to start and again to finish. Dictate sends the transcript to Ollama on this computer. The ordinary dictation shortcut works independently of Ollama.
 
 ---
 

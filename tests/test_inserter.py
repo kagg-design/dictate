@@ -55,12 +55,17 @@ class TextInserterTests(unittest.TestCase):
 
     def test_paste_text_uses_direct_insertion(self):
         call_order = []
+
+        def release_modifiers():
+            call_order.append("wait")
+            return True
+
         with (
             patch.object(inserter.sys, "platform", "win32"),
             patch.object(
                 inserter,
                 "_wait_for_modifiers_released",
-                side_effect=lambda: call_order.append("wait"),
+                side_effect=release_modifiers,
             ) as wait_for_release,
             patch.object(
                 inserter,
@@ -142,6 +147,24 @@ class TextInserterTests(unittest.TestCase):
 
         self.assertEqual(pressed_modifiers.call_count, 6)
         self.assertEqual(sleep.call_count, 5)
+
+    def test_stuck_win_key_times_out_before_inserting_new_dictation(self):
+        user32 = Mock()
+        user32.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key == 0x5B else 0
+
+        with (
+            patch.object(inserter.sys, "platform", "win32"),
+            patch.object(inserter.ctypes, "WinDLL", return_value=user32),
+            patch.object(inserter.time, "monotonic", side_effect=[0.0, 0.0, 3.0]),
+            patch.object(inserter.time, "sleep"),
+            patch.object(inserter, "_send_unicode_text") as send_unicode,
+        ):
+            with self.assertRaisesRegex(TimeoutError, "saved in History"):
+                inserter.paste_text("Recovered dictation")
+
+        self.read_context.assert_not_called()
+        inserter._try_insert_native_text.assert_not_called()
+        send_unicode.assert_not_called()
 
     def test_utf16_surrogate_pairs_are_sent_as_key_down_up_packets(self):
         fake_send_input = FakeSendInput()

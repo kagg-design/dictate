@@ -27,6 +27,7 @@ MODIFIER_KEYS = (
 )
 MODIFIER_RELEASE_POLL_SECONDS = 0.01
 MODIFIER_RELEASE_STABLE_CHECKS = 3
+MODIFIER_RELEASE_TIMEOUT_SECONDS = 3.0
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -116,10 +117,10 @@ def paste_text(text, *, use_cursor_context=True, target=None):
         return
 
     try:
-        if target is None:
-            _wait_for_modifiers_released()
-        elif not _wait_for_modifiers_released(timeout=3) or current_insertion_target() != target:
-            logger.info("Skipped inserting the last dictation because the shortcut or focus changed.")
+        if not _wait_for_modifiers_released():
+            raise TimeoutError("A modifier key stayed pressed. The dictation is saved in History.")
+        if target is not None and current_insertion_target() != target:
+            logger.info("Skipped text insertion because focus changed.")
             return
         text_to_insert = (
             format_for_cursor(text, _read_insert_context()) if use_cursor_context else text.strip(" \t")
@@ -138,17 +139,17 @@ def paste_text(text, *, use_cursor_context=True, target=None):
         raise
 
 
-def _wait_for_modifiers_released(*, timeout=None):
-    """Wait until physical modifiers are released for several consecutive polls."""
+def _wait_for_modifiers_released():
+    """Require several released polls, with a deadline for stale key states."""
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
     user32.GetAsyncKeyState.restype = wintypes.SHORT
 
     stable_checks = 0
     waiting_logged = False
-    deadline = time.monotonic() + timeout if timeout is not None else None
+    deadline = time.monotonic() + MODIFIER_RELEASE_TIMEOUT_SECONDS
     while stable_checks < MODIFIER_RELEASE_STABLE_CHECKS:
-        if deadline is not None and time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             return False
         pressed = _pressed_modifier_names(user32)
         if pressed:

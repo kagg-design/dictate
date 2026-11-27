@@ -248,6 +248,26 @@ class TrayHistoryTests(unittest.TestCase):
             "hotkey": "ctrl+win", "recognition_model": "fluid-speech-mini",
         })
 
+    def test_startup_shortcut_reports_model_loading_before_recording(self):
+        self.app.transcriber = None
+        self.app.models = {"whisper": ("Whisper", lambda: self.transcriber)}
+        self.transcriber.device = "cuda"
+        self.app.recorder.sample_rate = 16000
+        unavailable = Mock()
+
+        self.app.select_model("whisper", persist=False)
+        self.assertEqual(self.app.state, "loading")
+        self.assertIn("Loading speech model", self.app._tray_title(self.app.state))
+        self.assertFalse(self.app.start_capture(Mock(), Mock(), on_unavailable=unavailable))
+        unavailable.assert_called_once_with("Loading speech model…")
+        self.app.recorder.start.assert_not_called()
+
+        self.app._load_model(self.app.task_queue.get_nowait())
+        self.assertEqual(self.app.state, "idle")
+        self.assertIn("Whisper (CUDA)", self.app._tray_title(self.app.state))
+        self.assertTrue(self.app.start_capture(Mock(), Mock(), on_unavailable=unavailable))
+        self.app.recorder.start.assert_called_once()
+
     def test_model_switch_failure_keeps_the_active_engine(self):
         mini = Mock()
         mini.load_model.side_effect = RuntimeError("CUDA unavailable")
@@ -262,6 +282,7 @@ class TrayHistoryTests(unittest.TestCase):
         self.assertEqual(self.app.model_name, "whisper")
         self.assertIs(self.app.transcriber, self.transcriber)
         self.assertFalse(self.app._loading_model)
+        self.assertEqual(self.app.state, "idle")
 
 
 if __name__ == "__main__":

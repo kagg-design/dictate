@@ -9,6 +9,7 @@ from src.inserter import InsertionTarget, current_insertion_target, paste_text, 
 from src.clipboard import copy_text
 from src.history import DictationHistory
 from src.config import CUE_VOLUME_OPTIONS, save_recognition_model, save_settings
+from src.gemma import GEMMA_MODEL
 from src.hotkey import validate_postprocess_shortcut
 from src.live_transcription import CompletedCapture, LiveTranscription
 from src.replacements import TextReplacements
@@ -103,7 +104,7 @@ class SystemTrayApp:
         self._postprocess_warmup = PostprocessWarmup()
         self.preview_text = ""
         
-        self.state = 'idle'
+        self.state = "starting" if transcriber is None else "idle"
         self.is_paused = False
         
         # Thread-safe queue for processing recorded audio buffers
@@ -144,8 +145,8 @@ class SystemTrayApp:
         # Setup the pystray icon
         self.icon = TrayIcon(
             name="dictate",
-            icon=self._generate_icon_image('idle'),
-            title="Dictate Tool",
+            icon=self._generate_icon_image(self.state),
+            title=self._tray_title(self.state),
             menu=self.menu
         )
 
@@ -156,6 +157,14 @@ class SystemTrayApp:
     @property
     def dictation_busy(self):
         return bool(self._capture or self._pending_captures)
+
+    @property
+    def postprocess_status(self):
+        return self._postprocess_warmup.status
+
+    @property
+    def postprocess_detail(self):
+        return self._postprocess_warmup.detail
 
     @property
     def settings_activity(self):
@@ -173,12 +182,13 @@ class SystemTrayApp:
                 return
             self.settings_error = ""
             self._loading_model = True
+            if not self.is_paused:
+                self.set_state("loading")
             self.task_queue.put(ModelSelection(model, persist))
 
     def _load_model(self, selection):
         label, create = self.models[selection.model]
         engine = None
-        self.show_notification("Loading Speech Model", label)
         try:
             engine = create()
             engine.load_model()
@@ -195,13 +205,13 @@ class SystemTrayApp:
             self.model_name = selection.model
             if previous is not None:
                 self._close_engine(previous)
-            self.icon.title = f"Dictate · {label} ({engine.device.upper()})"
             logger.info("Speech model ready: %s (%s)", label, engine.device)
             self.show_notification("Dictate Ready", f"{label} on {engine.device.upper()}.")
             self._postprocess_warmup.select(self.postprocess_model)
         finally:
             with self._capture_lock:
                 self._loading_model = False
+                self._restore_tray_state()
             self.ui_queue.put(REFRESH_HISTORY_MENU)
 
     def select_microphone(self, microphone):
@@ -343,18 +353,23 @@ class SystemTrayApp:
         except Exception:
             logger.exception("Failed to release the previous speech engine")
 
-    def start_capture(self, on_limit_reached, on_audio_start, *, postprocess=False):
+    def start_capture(self, on_limit_reached, on_audio_start, *, postprocess=False, on_unavailable=None):
         with self._capture_lock:
             if not self.running or self._capture:
                 return False
-            if postprocess and not self.postprocess_model:
-                self.show_notification("Post-Processing", "Select a local Ollama model in Dictate Settings.")
-                return False
-            if self.settings_activity or self.transcriber is None:
-                message = (
-                    self.settings_activity or "Select a speech model in Dictate Settings."
-                )
-                self.show_notification("Dictation Unavailable", message)
+            message = self.settings_activity
+            if self.state == "starting":
+                message = "Starting Dictate…"
+            elif not message and self.transcriber is None:
+                message = "Speech model unavailable. Open Dictate Settings."
+            elif not message and postprocess and not self.postprocess_model:
+                message = "Select a local editing model in Dictate Settings."
+            elif not message and postprocess and self.postprocess_model == GEMMA_MODEL and self.postprocess_status != "ready":
+                message = self.postprocess_detail or "Getting Gemma ready…"
+            if message:
+                logger.info("Dictation shortcut unavailable: %s", message)
+                if on_unavailable is not None:
+                    on_unavailable(message)
                 return False
 
             capture = LiveTranscription(
@@ -522,7 +537,8 @@ class SystemTrayApp:
             self.set_state('paused')
             self.show_notification("Dictation Paused", "PTT hotkey has been disabled.")
         else:
-            self.set_state('idle')
+            with self._capture_lock:
+                self._restore_tray_state()
             self.show_notification("Dictation Resumed", "Press Ctrl+Win to begin dictating.")
             
         # Force a context menu update to reflect label change immediately
@@ -592,6 +608,7 @@ class SystemTrayApp:
                         self.icon.update_menu()
                     else:
                         self.icon.icon = self._generate_icon_image(state)
+                        self.icon.title = self._tray_title(state)
                 except Exception as e:
                     logger.debug(f"UI thread failed to update icon handle: {e}")
                 self.ui_queue.task_done()
@@ -643,7 +660,10 @@ class SystemTrayApp:
                 text = self.replacements.apply(text)
                 if postprocessing:
                     try:
-                        text = polish(text, task.postprocess_model)
+                        if task.postprocess_model == GEMMA_MODEL:
+                            text = self._postprocess_warmup.edit_gemma(text)
+                        else:
+                            text = polish(text, task.postprocess_model)
                     except ValueError as exc:
                         logger.info("Post-processing skipped: %s", exc)
                         self.show_notification("Post-Processing", "Local editing failed. Using the recognized text.")
@@ -672,8 +692,28 @@ class SystemTrayApp:
     def _restore_tray_state(self):
         if self.is_paused:
             self.set_state("paused")
+        elif self._loading_model:
+            self.set_state("loading")
+        elif self.transcriber is None:
+            self.set_state("unavailable")
         elif self._capture is None:
             self.set_state("transcribing" if self._pending_captures else "idle")
+
+    def _tray_title(self, state):
+        status = {
+            "starting": "Starting Dictate…",
+            "loading": "Loading speech model…",
+            "unavailable": "Speech model unavailable · Open Settings",
+            "paused": "Dictation paused",
+            "recording": "Recording",
+            "transcribing": "Finishing dictation…",
+        }.get(state)
+        if status:
+            return f"Dictate · {status}"
+        if self.model_name in self.models and self.transcriber is not None:
+            label, _ = self.models[self.model_name]
+            return f"Dictate · {label} ({self.transcriber.device.upper()})"
+        return "Dictate · Ready to dictate"
 
     def _generate_icon_image(self, state):
         """
@@ -682,6 +722,19 @@ class SystemTrayApp:
         # Create RGBA canvas for smooth circle corners
         image = Image.new('RGBA', (32, 32), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
+
+        if state in ("starting", "loading", "unavailable"):
+            draw.rounded_rectangle((2, 2, 29, 29), radius=6, fill=(82, 54, 17, 255))
+            amber = (255, 210, 123, 255)
+            if state == "unavailable":
+                draw.rounded_rectangle((14, 8, 17, 18), radius=1, fill=amber)
+                draw.ellipse((14, 21, 17, 24), fill=amber)
+            else:
+                draw.line((9, 8, 22, 8), fill=amber, width=2)
+                draw.line((9, 23, 22, 23), fill=amber, width=2)
+                draw.line((10, 9, 11, 13, 19, 18, 21, 22), fill=amber, width=2)
+                draw.line((21, 9, 20, 13, 12, 18, 10, 22), fill=amber, width=2)
+            return image
         
         # State styling definitions (background rounded square badge + foreground microphone)
         if state == 'idle':

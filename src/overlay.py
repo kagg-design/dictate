@@ -14,6 +14,7 @@ TRANSPARENT = "#181818"
 RED = "#ff3333"
 BLUE = "#3c9bff"
 PROCESSING_DELAY = 0.4
+STATUS_DURATION = 2.5
 
 
 class RecordingOverlay:
@@ -42,6 +43,8 @@ class RecordingOverlay:
         )
         self._preview_label.pack(fill="both", expand=True)
         self._preview_text = ""
+        self._status_text = ""
+        self._status_until = 0.0
         self._processing_since = None
 
         self.canvas = tk.Canvas(
@@ -86,6 +89,7 @@ class RecordingOverlay:
 
     def set_recording(self, recording):
         if recording:
+            self._status_until = 0.0
             self._stop_processing()
             if self._animation is None:
                 self._show_without_activation(self.window)
@@ -96,14 +100,23 @@ class RecordingOverlay:
             self.window.withdraw()
             self._set_preview("")
 
+    def show_status(self, message):
+        self._status_text = message
+        self._status_until = monotonic() + STATUS_DURATION
+
     def update_feedback(self, text, processing, *, show_preview=False):
         recording = self._animation is not None
+        now = monotonic()
         if recording or not processing:
             self._processing_since = None
             self._stop_processing()
-            self._set_preview(text if recording and show_preview else "")
+            if recording:
+                self._set_preview(text if show_preview else "")
+            else:
+                self._set_preview(self._status_text if now < self._status_until else "")
             return
-        now = monotonic()
+        self._status_until = 0.0
+        self._set_preview("")
         if self._processing_since is None:
             self._processing_since = now
         if self._rotation is None and now - self._processing_since >= PROCESSING_DELAY:

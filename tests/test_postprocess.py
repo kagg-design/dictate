@@ -1,12 +1,37 @@
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from src.gemma import LocalGemma
 from src.hotkey import HotkeyManager
 from src.postprocess import KEEP_ALIVE, installed_models, polish, warm_model
 
 
 class PostprocessTests(unittest.TestCase):
+    def test_gemma_download_resumes_and_verifies_before_publishing_weights(self):
+        weights = b"test weights"
+        response = BytesIO(weights[4:])
+        response.status = 206
+        response.headers = {"Content-Range": f"bytes 4-{len(weights) - 1}/{len(weights)}"}
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "model.gguf"
+            partial = path.with_suffix(".part")
+            partial.write_bytes(weights[:4])
+            engine = LocalGemma(weights=path)
+            with (
+                patch("src.gemma.GEMMA_BYTES", len(weights)),
+                patch("src.gemma.GEMMA_SHA256", sha256(weights).hexdigest()),
+                patch("src.gemma.urlopen", return_value=response) as download,
+            ):
+                engine._download(Mock())
+            self.assertEqual(download.call_args.args[0].get_header("Range"), "bytes=4-")
+            self.assertEqual(path.read_bytes(), weights)
+            self.assertFalse(partial.exists())
+
     @patch("src.postprocess._request")
     def test_warms_only_a_local_model_with_no_dictation(self, request):
         request.side_effect = [{"details": {}}, {"done": True}]

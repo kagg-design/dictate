@@ -3,18 +3,26 @@
 from argparse import ArgumentParser
 from hashlib import file_digest
 from pathlib import Path
-from shutil import copy2, copytree, ignore_patterns
+from shutil import copy2, copyfileobj, copytree, ignore_patterns
 from subprocess import run
 import os
 import re
 import sys
 import sysconfig
 from tempfile import TemporaryDirectory
+from urllib.request import urlopen
+from zipfile import ZipFile
 
 
 PROJECT = Path(__file__).resolve().parents[1]
 PACKAGING = PROJECT / "packaging" / "windows"
 OUTPUT = PROJECT / "artifacts" / "windows"
+GEMMA_RUNTIME_TAG = "b12774"
+GEMMA_RUNTIME_FILE = f"llama-{GEMMA_RUNTIME_TAG}-bin-win-vulkan-x64.zip"
+GEMMA_RUNTIME_URL = f"https://github.com/ggml-org/llama.cpp/releases/download/{GEMMA_RUNTIME_TAG}/{GEMMA_RUNTIME_FILE}"
+GEMMA_RUNTIME_SHA256 = "d29a16265d26ef7598209caaf1a544cbfa6abe2858c24b0ce4ae6bff87a76f22"
+GEMMA_LICENSE_URL = f"https://raw.githubusercontent.com/ggml-org/llama.cpp/{GEMMA_RUNTIME_TAG}/LICENSE"
+GEMMA_LICENSE_SHA256 = "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
 SMOKE_CHECK = """
 import sys
 import tkinter as tk
@@ -23,6 +31,7 @@ from tkinter import font
 from src.recording_cues import RECORDING_CUES
 from src.desktop_theme import DesktopStyles
 from src.config import DEFAULT_CONFIG
+from src.gemma import gemma_executable
 from src.paths import IS_INSTALLED
 from src.recorder import list_microphones
 from src.transcriber import WhisperTranscriber
@@ -31,6 +40,7 @@ from src.tray import SystemTrayApp
 assert IS_INSTALLED and DEFAULT_CONFIG['device'] == 'auto'
 assert sys.version_info[:2] == (3, 12)
 assert all(path.is_file() for path in RECORDING_CUES.values())
+assert gemma_executable().is_file()
 root = tk.Tk()
 root.withdraw()
 try:
@@ -40,6 +50,42 @@ finally:
     root.destroy()
 print('Packaged Python, application imports, Tk, and Windows fonts verified.')
 """
+
+
+def verified_build_asset(cache, scratch, filename, url, expected):
+    asset = cache / filename
+    if not asset.is_file():
+        staged = scratch / filename
+        with urlopen(url, timeout=60) as response, staged.open("wb") as output:
+            copyfileobj(response, output)
+        asset = staged
+    with asset.open("rb") as binary:
+        if file_digest(binary, "sha256").hexdigest() != expected:
+            raise ValueError(f"Checksum mismatch for {asset}")
+    if asset.parent == scratch:
+        asset = asset.replace(cache / filename)
+    return asset
+
+
+def prepare_gemma_runtime(payload):
+    cache = PROJECT / "artifacts" / "windows-build" / "gemma-runtime"
+    cache.mkdir(parents=True, exist_ok=True)
+    archive = verified_build_asset(cache, payload.parent, GEMMA_RUNTIME_FILE, GEMMA_RUNTIME_URL, GEMMA_RUNTIME_SHA256)
+    license_file = verified_build_asset(cache, payload.parent, "llama.LICENSE", GEMMA_LICENSE_URL, GEMMA_LICENSE_SHA256)
+    gemma = payload / "assets" / "gemma"
+    gemma.mkdir(parents=True)
+    required = {
+        "llama-server.exe", "llama-server-impl.dll", "llama.dll", "llama-common.dll", "mtmd.dll",
+        "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll", "libomp.dll", "LICENSE-LLVM-OpenMP",
+    }
+    with ZipFile(archive) as package:
+        if missing := required.difference(package.namelist()):
+            raise ValueError(f"Missing llama.cpp files: {', '.join(sorted(missing))}")
+        for name in package.namelist():
+            if name in required or re.fullmatch(r"ggml-cpu-[a-z0-9]+\.dll", name):
+                package.extract(name, gemma)
+    copy2(license_file, gemma / "LICENSE-llama.cpp")
+    run([gemma / "llama-server.exe", "--version"], cwd=gemma, check=True)
 
 
 def prepare_payload(payload, version):
@@ -55,6 +101,7 @@ def prepare_payload(payload, version):
 
     copytree(PROJECT / "src", payload / "src", ignore=ignore_patterns("__pycache__"))
     copytree(PROJECT / "assets" / "sounds", payload / "assets" / "sounds")
+    prepare_gemma_runtime(payload)
     copy2(PROJECT / "icon.ico", payload)
     copy2(PACKAGING / "requirements-cuda.txt", payload)
     (payload / "dictate-installed.txt").write_text(version + "\n", encoding="utf-8")

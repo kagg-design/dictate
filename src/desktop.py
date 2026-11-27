@@ -8,6 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 import wave
+import webbrowser
 import winsound
 
 from PIL import Image, ImageTk
@@ -21,15 +22,17 @@ from src.desktop_theme import (
     style_windows_titlebar,
     system_appearance,
 )
+from src.gemma import GEMMA_BYTES, GEMMA_MODEL, gemma_executable
 from src.logger import logger
 from src.history import WAV_RETENTION_OPTIONS
-from src.hotkey import MODES
+from src.hotkey import MODES, validate_postprocess_shortcut
 from src.overlay import RecordingOverlay
 from src.paths import APP_ROOT
 from src.postprocess import installed_models
 from src.recording_cues import RecordingCuePlayer
 from src.recorder import list_microphones
 from src.settings_view import SCROLL_STEP, SettingsView
+from src.shortcuts import Shortcut
 from src.startup import set_start_at_login, startup_shortcut
 from src.window_position import WindowPosition
 
@@ -69,6 +72,9 @@ class DesktopApp:
 
     def show(self, icon=None, item=None):
         self._commands.put("show")
+
+    def show_status(self, message):
+        self._commands.put(message)
 
     def show_running_instance(self):
         return bool(self._activation and self._win32.SetEvent(self._activation))
@@ -123,6 +129,8 @@ class DesktopApp:
                         return
                     if command == "show":
                         show_pending = True
+                    elif isinstance(command, str):
+                        overlay.show_status(command)
                     elif command != recording:
                         recording = command
                         overlay.set_recording(recording)
@@ -435,17 +443,31 @@ class DictateWindow:
         ]
 
         processing = canvas.add_section("postprocessing", "Local post-processing")
-        row = self._settings_row(processing, "Ollama model")
-        self.ollama_model = self._settings_combo(row, 24, (), self._save_postprocessing)
+        self._bundled_editing_models = (GEMMA_MODEL,) if gemma_executable().is_file() else ()
+        if self._bundled_editing_models:
+            row = self._settings_row(
+                processing, "Gemma 4 E2B", f"Runs locally. Downloads {GEMMA_BYTES / 1e9:.1f} GB once.",
+            )
+            self.gemma_toggle = ttk.Button(row, style="Settings.TButton", command=self._toggle_gemma)
+            self.gemma_toggle.pack(side="left")
+        row = self._settings_row(processing, "Editing model")
+        self.ollama_model = self._settings_combo(row, 24, self._bundled_editing_models, self._save_postprocessing)
         self.ollama_model.set(self.app.postprocess_model)
         self.ollama_model.pack(side="left")
         self.refresh_ollama = ttk.Button(row, text="Refresh", style="Settings.TButton", command=self._refresh_ollama_models)
         self.refresh_ollama.pack(side="left", padx=(4, 0))
+        row = self._settings_row(processing, "Editing status")
         self.ollama_status = ttk.Label(row, style="SettingsDetail.TLabel")
-        self.ollama_status.pack(side="left", padx=(8, 0))
+        self.ollama_status.pack(side="left", padx=(0, 8))
+        ttk.Button(
+            row, text="Get Ollama", style="Settings.TButton",
+            command=lambda: webbrowser.open("https://ollama.com/download/windows"),
+        ).pack(side="left")
         self._ollama_results = SimpleQueue()
         self._loading_ollama = False
         self._requested_ollama = False
+        self._ollama_models = None
+        self._ollama_error = False
         self.postprocess_button = self._shortcut_button(processing, "Dictate with editing", "postprocess_shortcut")
         self.settings_canvas.add_row(processing, "Press the editing shortcut once to start and again to finish.")
 
@@ -719,7 +741,28 @@ class DictateWindow:
             self._save_dictation_preferences(**{slot: binding})
 
     def _save_postprocessing(self, event=None):
-        self.app.set_postprocessing(self.ollama_model.get(), self.app.hotkey_manager.postprocess_shortcut)
+        model = self.ollama_model.get()
+        binding = self.app.hotkey_manager.postprocess_shortcut
+        if model == GEMMA_MODEL and binding is None:
+            binding = self._default_editing_shortcut()
+        self.app.set_postprocessing(model, binding)
+        self._refresh_settings(force=True)
+
+    def _default_editing_shortcut(self):
+        binding = Shortcut.from_setting("ctrl+alt+f10")
+        hotkeys = self.app.hotkey_manager
+        try:
+            validate_postprocess_shortcut(binding, hotkeys.shortcut, hotkeys.insert_last_shortcut)
+        except ValueError:
+            return None
+        return binding
+
+    def _toggle_gemma(self):
+        hotkeys = self.app.hotkey_manager
+        if self.app.postprocess_model == GEMMA_MODEL:
+            self.app.set_postprocessing("", None)
+        else:
+            self.app.set_postprocessing(GEMMA_MODEL, hotkeys.postprocess_shortcut or self._default_editing_shortcut())
         self._refresh_settings(force=True)
 
     def _refresh_ollama_models(self):
@@ -742,10 +785,39 @@ class DictateWindow:
         except Empty:
             return
         self._loading_ollama = False
-        self.ollama_model.configure(values=models)
+        self._ollama_models = models
+        self._ollama_error = bool(error)
+        self.ollama_model.configure(values=(*self._bundled_editing_models, *models))
         self.refresh_ollama.configure(state="normal")
-        self.ollama_status.configure(text="Ollama unavailable" if error else ("No local models" if not models else ""))
         self._refresh_settings(force=True)
+
+    def _update_editing_status(self):
+        warmup = self.app.postprocess_status
+        if self.app.postprocess_model == GEMMA_MODEL:
+            if warmup == "ready":
+                message = "Gemma ready" if self.app.hotkey_manager.postprocess_shortcut else "Assign an editing shortcut"
+            else:
+                message = self.app.postprocess_detail or "Getting Gemma ready…"
+        elif not self.app.postprocess_model and self._bundled_editing_models:
+            message = "Editing off"
+        elif self._loading_ollama:
+            message = "Checking Ollama…"
+        elif self._ollama_error:
+            message = "Install or start Ollama"
+        elif self._ollama_models == ():
+            message = "Download an Ollama model"
+        elif self._ollama_models and self.app.postprocess_model and self.app.postprocess_model not in self._ollama_models:
+            message = "Selected model not installed"
+        elif warmup == "ready":
+            message = "Editing model ready"
+        elif warmup == "loading":
+            message = "Loading editing model…"
+        elif warmup == "unavailable":
+            message = "Editing model unavailable"
+        else:
+            message = "Choose an Ollama model"
+        if self.ollama_status.cget("text") != message:
+            self.ollama_status.configure(text=message)
 
     def _poll_shortcut_capture(self):
         if self._shortcut_capture is None:
@@ -862,6 +934,7 @@ class DictateWindow:
         self._update_status()
         if self._page == "Settings":
             self._poll_shortcut_capture()
+            self._update_editing_status()
             self._refresh_settings()
         elif self._entries != self.app.history.recent():
             self._refresh_history()
@@ -873,14 +946,18 @@ class DictateWindow:
             self.shortcut_summary.configure(text=shortcut)
         if self.app.is_paused:
             state, kind = "Dictation paused", "Warning"
+        elif self.app.state == "starting":
+            state, kind = "Starting Dictate…", "Info"
         elif self.app.settings_activity:
-            state, kind = "Getting ready", "Info"
+            state, kind = self.app.settings_activity, "Info"
         elif self.app.state == "recording":
             state, kind = "Recording", "Danger"
         elif self.app.state == "transcribing":
             state, kind = "Finishing dictation", "Info"
-        elif self.app.transcriber is None or not self.app.recorder.microphone_ready:
-            state, kind = "Setup needed", "Warning"
+        elif self.app.transcriber is None:
+            state, kind = "Speech model unavailable", "Warning"
+        elif not self.app.recorder.microphone_ready:
+            state, kind = "Microphone unavailable", "Warning"
         elif self.app.transcriber.device == "cpu":
             state, kind = "Ready · CPU mode", "Warning"
         else:
@@ -981,6 +1058,11 @@ class DictateWindow:
         )
         self.ollama_model.configure(state="disabled" if busy else "readonly")
         self.ollama_model.set(self.app.postprocess_model)
+        if self._bundled_editing_models:
+            self.gemma_toggle.configure(
+                text="Turn off Gemma" if self.app.postprocess_model == GEMMA_MODEL else "Enable Gemma",
+                state="disabled" if busy else "normal",
+            )
         for option in self.dictation_options:
             option.configure(state="disabled" if busy else "normal")
         self.escape_cancels.set(hotkeys.escape_cancels)
